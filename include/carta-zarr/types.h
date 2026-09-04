@@ -170,6 +170,13 @@ struct DatasetDescriptor {
     std::vector<Diagnostic> diagnostics;
 };
 
+struct DatasetSize {
+    // The size of the on-disk store when it could be enumerated quickly, or the total logical
+    // bytes represented by all arrays when the directory scan timed out.
+    std::uint64_t bytes = 0;
+    bool is_upper_bound = false;
+};
+
 struct ImageDescriptor {
     std::string id;
     std::string image_role;

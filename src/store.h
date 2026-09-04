@@ -67,6 +67,7 @@ public:
     Result<nlohmann::json> ReadNodeMetadata(std::string_view node) const;
     Result<zarr::ArrayMetadata> ReadArrayMetadata(std::string_view node) const;
     Result<std::vector<std::pair<std::string, nlohmann::json>>> ListNodeMetadata() const;
+    Result<std::uint64_t> ComputeTotalArraySizeBytes() const;
     // Values in C order, flattened. The rank is in the node's ArrayMetadata; ArrayView addresses
     // them by dimension name rather than by offset.
     Result<std::vector<double>> ReadNumericArray(std::string_view node) const;

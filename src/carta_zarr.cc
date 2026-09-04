@@ -12,6 +12,9 @@
 #include "zarr/store_context.h"
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -29,6 +32,55 @@ std::string SchemaErrorMessage(const SchemaProbeResult& result) {
         message = result.diagnostics.front().message;
     }
     return message;
+}
+
+bool TryComputeDirectorySize(std::string_view location, std::chrono::milliseconds timeout, std::uint64_t& size) {
+    const std::string location_string(location);
+    std::filesystem::path root_path;
+    if (location_string.rfind("file://", 0) == 0) {
+        root_path = std::filesystem::path(location_string.substr(7));
+    } else if (location_string.find("://") != std::string::npos) {
+        return false;
+    } else {
+        root_path = std::filesystem::path(location_string);
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::uint64_t directory_size = 0;
+    std::error_code error;
+    std::filesystem::recursive_directory_iterator iterator(
+        root_path, std::filesystem::directory_options::skip_permission_denied, error);
+    if (error) {
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    while (iterator != end) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+
+        std::error_code entry_error;
+        if (iterator->is_regular_file(entry_error)) {
+            if (entry_error) {
+                return false;
+            }
+            const auto file_size = iterator->file_size(entry_error);
+            if (entry_error || file_size > std::numeric_limits<std::uint64_t>::max() - directory_size) {
+                return false;
+            }
+            directory_size += file_size;
+        } else if (entry_error) {
+            return false;
+        }
+
+        iterator.increment(error);
+        if (error) {
+            return false;
+        }
+    }
+
+    size = directory_size;
+    return true;
 }
 
 }  // namespace
@@ -161,6 +213,23 @@ Result<Dataset> Dataset::Open(const Context& context, std::string_view location)
 const DatasetDescriptor& Dataset::descriptor() const noexcept {
     static const DatasetDescriptor empty_descriptor;
     return _impl ? _impl->descriptor : empty_descriptor;
+}
+
+Result<DatasetSize> Dataset::Size(std::chrono::milliseconds directory_size_timeout) const {
+    if (!_impl) {
+        return MakeError(ErrorCode::invalid_argument, "Dataset handle is empty");
+    }
+
+    std::uint64_t physical_size = 0;
+    if (TryComputeDirectorySize(_impl->location, directory_size_timeout, physical_size)) {
+        return DatasetSize{physical_size, false};
+    }
+
+    auto logical_size = _impl->store->ComputeTotalArraySizeBytes();
+    if (!logical_size) {
+        return logical_size.error();
+    }
+    return DatasetSize{logical_size.value(), true};
 }
 
 Result<Image> Dataset::OpenImage(std::string_view image_id) const {

@@ -143,6 +143,15 @@ void TestValidAndTimeAxis(const std::filesystem::path& root) {
     const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
     Require(static_cast<bool>(dataset), "Dataset::Open failed");
     Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"SKY"}, "unexpected image ids");
+
+    const auto logical_size = dataset.value().Size(std::chrono::milliseconds(0));
+    Require(logical_size && logical_size.value().bytes == 592 && logical_size.value().is_upper_bound,
+            "logical Zarr size calculation was incorrect");
+
+    const auto physical_size = dataset.value().Size(std::chrono::milliseconds(5000));
+    Require(physical_size && physical_size.value().bytes > 0 && !physical_size.value().is_upper_bound,
+            "physical Zarr size calculation was not used");
+
     const auto image = dataset.value().OpenImage("SKY");
     Require(static_cast<bool>(image),
             "Dataset::OpenImage failed" + (image ? std::string{} : ": " + image.error().message));

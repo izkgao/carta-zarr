@@ -11,6 +11,7 @@
 #include "carta-zarr/result.h"
 #include "carta-zarr/types.h"
 
+#include <chrono>
 #include <memory>
 
 namespace carta::zarr {
@@ -67,6 +68,10 @@ public:
     static Result<Dataset> Open(const Context& context, std::string_view location);
 
     const DatasetDescriptor& descriptor() const noexcept;
+    // Returns the physical store size when directory enumeration completes within the timeout;
+    // otherwise returns the logical uncompressed size of all arrays and marks it as an upper bound.
+    Result<DatasetSize> Size(
+        std::chrono::milliseconds directory_size_timeout = std::chrono::milliseconds(50)) const;
     Result<Image> OpenImage(std::string_view image_id) const;
 
 private:

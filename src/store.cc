@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -140,6 +142,32 @@ Result<void> ApplyShardingLayout(const nlohmann::json& sharding, StorageLayout& 
                          std::string(node));
     }
     return {};
+}
+
+Result<std::uint64_t> ElementSizeBytes(const zarr::ArrayMetadata& metadata, std::string_view node) {
+    static const std::map<std::string_view, std::uint64_t> element_sizes{
+        {"bool", 1},      {"int8", 1},       {"uint8", 1},      {"int16", 2},
+        {"uint16", 2},    {"int32", 4},      {"uint32", 4},     {"int64", 8},
+        {"uint64", 8},    {"float16", 2},    {"float32", 4},    {"float64", 8},
+        {"complex64", 8}, {"complex128", 16},
+    };
+    if (const auto found = element_sizes.find(metadata.data_type); found != element_sizes.end()) {
+        return found->second;
+    }
+
+    // XRADIO coordinate labels use the fixed_length_utf32 extension data type. Other fixed-length
+    // extension types can be sized the same way when they declare length_bytes.
+    if (metadata.data_type_configuration.is_object() &&
+        metadata.data_type_configuration.contains("length_bytes")) {
+        const auto& length_bytes = metadata.data_type_configuration.at("length_bytes");
+        if (zarr::IsPositiveInteger(length_bytes)) {
+            return length_bytes.get<std::uint64_t>();
+        }
+    }
+
+    return MakeError(ErrorCode::unsupported_data_type,
+                     "Array " + std::string(node) + " has unsupported data_type " + metadata.data_type,
+                     std::string(node));
 }
 
 }  // namespace
@@ -279,6 +307,54 @@ Result<std::vector<std::pair<std::string, nlohmann::json>>> Store::ListNodeMetad
         }
         return result;
     });
+}
+
+Result<std::uint64_t> Store::ComputeTotalArraySizeBytes() const {
+    auto nodes_result = ListNodeMetadata();
+    if (!nodes_result) {
+        return nodes_result.error();
+    }
+
+    std::uint64_t total_bytes = 0;
+    std::size_t array_count = 0;
+    for (const auto& [node, metadata] : nodes_result.value()) {
+        if (!metadata.is_object() || metadata.value("node_type", "") != "array") {
+            continue;
+        }
+        ++array_count;
+
+        auto array_metadata_result = ReadArrayMetadata(node);
+        if (!array_metadata_result) {
+            return array_metadata_result.error();
+        }
+        const auto& array_metadata = array_metadata_result.value();
+        auto element_size_result = ElementSizeBytes(array_metadata, node);
+        if (!element_size_result) {
+            return element_size_result.error();
+        }
+
+        std::uint64_t array_bytes = element_size_result.value();
+        for (const auto dimension : array_metadata.shape) {
+            if (dimension == 0) {
+                array_bytes = 0;
+                break;
+            }
+            if (array_bytes > std::numeric_limits<std::uint64_t>::max() / dimension) {
+                return MakeError(ErrorCode::invalid_metadata,
+                                 "Array " + node + " byte size overflows uint64_t", node);
+            }
+            array_bytes *= dimension;
+        }
+        if (total_bytes > std::numeric_limits<std::uint64_t>::max() - array_bytes) {
+            return MakeError(ErrorCode::invalid_metadata, "Total Zarr array byte size overflows uint64_t");
+        }
+        total_bytes += array_bytes;
+    }
+
+    if (array_count == 0) {
+        return MakeError(ErrorCode::invalid_metadata, "Zarr store contains no arrays");
+    }
+    return total_bytes;
 }
 
 Result<std::vector<double>> Store::ReadNumericArray(std::string_view node) const {
