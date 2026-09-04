@@ -55,7 +55,7 @@ public:
             return MakeError(ErrorCode::not_found, "Zarr node is missing zarr.json", metadata_path.string());
         }
 
-        std::ifstream input(metadata_path, std::ios::binary);
+        std::ifstream const input(metadata_path, std::ios::binary);
         if (!input.is_open()) {
             return MakeError(ErrorCode::io_error, "Unable to read Zarr metadata", metadata_path.string());
         }

@@ -71,7 +71,8 @@ private:
     void AddDiagnostic(std::string code, std::string message, std::string node_path = {});
     bool Fail(std::string code, std::string message, std::string node_path);
 
-    const Store& _store;
+    // ProbeReport borrows the store for its short-lived probing operation.
+    const Store* _store;
     std::string _profile_name;
     std::vector<Diagnostic> _diagnostics;
     std::optional<Error> _error;

@@ -16,7 +16,7 @@ namespace zarr_metadata = ::carta::zarr::internal::zarr;
 }  // namespace
 
 ProbeReport::ProbeReport(const Store& store, std::string profile_name)
-    : _store(store), _profile_name(std::move(profile_name)) {}
+    : _store(&store), _profile_name(std::move(profile_name)) {}
 
 bool ProbeReport::ok() const noexcept {
     return _met && !_error.has_value();
@@ -75,7 +75,7 @@ bool ProbeReport::RequireCoordinateOf(const zarr::ArrayMetadata& image, std::str
     }
 
     const std::string node(axis);
-    auto metadata_result = _store.ReadNodeMetadata(axis);
+    auto metadata_result = _store->ReadNodeMetadata(axis);
     if (!metadata_result) {
         if (metadata_result.error().code == ErrorCode::not_found) {
             return Fail("invalid_metadata", "Missing required coordinate array", node);
@@ -86,7 +86,7 @@ bool ProbeReport::RequireCoordinateOf(const zarr::ArrayMetadata& image, std::str
 
     // ReadArrayMetadata reuses both the raw metadata and parsed array metadata caches. Keeping the
     // raw read above preserves the distinction between missing metadata and other I/O errors.
-    auto array_result = _store.ReadArrayMetadata(axis);
+    auto array_result = _store->ReadArrayMetadata(axis);
     if (!RequireArrayMetadata(array_result, node)) {
         return false;
     }
