@@ -67,3 +67,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+__pycache__/
+*.py[cod]
+
+# Fixtures under tests/data/ are committed on purpose: the C++ suite must run without a Python
+# toolchain, and the conformance fixture is the record of what XRADIO actually writes. Only the
+# intermediate FITS the conformance generator writes is transient, and it deletes that itself.

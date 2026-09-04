@@ -1,0 +1,51 @@
+---
+# clang-tidy configuration for carta-zarr (C++17)
+
+Checks: >-
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-empty-catch,
+  -bugprone-unchecked-optional-access,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-type-member-init,
+  -cppcoreguidelines-explicit-*,
+  google-*,
+  -google-build-using-namespace,
+  -google-explicit-constructor,
+  misc-*,
+  -misc-explicit-constructor,
+  -misc-non-private-member-variables-in-classes,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  performance-*,
+  -performance-trivially-destructible,
+  -performance-enum-size,
+  readability-*,
+  -readability-avoid-const-params-in-decls,
+  -readability-else-after-return,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-identifier-naming,
+  -readability-trailing-comma,
+  -readability-named-parameter,
+  -readability-convert-member-functions-to-static
+
+# Treat warnings as errors (empty by default)
+WarningsAsErrors: ''
+
+# Filter: only check project headers, ignore system & third-party libraries
+HeaderFilterRegex: '(include/carta-zarr/.*|src/.*)'
+
+# Use .clang-format for auto-fixes
+FormatStyle: file
+...

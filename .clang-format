@@ -1,0 +1,108 @@
+---
+# Based on Google / Modern C++ conventions with enhanced readability
+BasedOnStyle: Google
+Language: Cpp
+Standard: Latest
+
+# Indentation & Alignment
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+
+# Line Length & Wrapping
+ColumnLimit: 120
+
+# Braces & Control Statements
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterObjCDeclaration: false
+  AfterStruct: false
+  AfterUnion: false
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+
+# Keep simple lambdas and empty functions clean, but avoid excessive one-liners
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: All
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Pointer & Reference Alignment (Modern C++ standard: Type& ref, Type* ptr)
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Namespaces & Scopes
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+# Alignment & Whitespace
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignEscapedNewlines: Left
+AlignOperands: AlignAfterOperator
+AlignTrailingComments: true
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInAngles: Never
+SpacesInConditionalStatement: false
+SpacesInContainerLiterals: false
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Include Management (Clang-format standard category grouping)
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Main header matching the current file
+  - Regex: '^"(carta-zarr/|carta_zarr/)'
+    Priority: 1
+    SortPriority: 1
+  # Project-local / internal headers
+  - Regex: '^"'
+    Priority: 2
+    SortPriority: 2
+  # Third-party / library headers
+  - Regex: '^<[a-z0-9_]+/'
+    Priority: 3
+    SortPriority: 3
+  # Standard library headers
+  - Regex: '^<[a-z0-9_]+>'
+    Priority: 4
+    SortPriority: 4
+  - Regex: '.*'
+    Priority: 5
+    SortPriority: 5
+...

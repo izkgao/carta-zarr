@@ -1,0 +1,24 @@
+# clangd configuration for carta-zarr
+
+CompileFlags:
+  CompilationDatabase: build
+  Add:
+    - -std=c++17
+    - -Wall
+    - -Wextra
+
+Diagnostics:
+  ClangTidy:
+    # Let clangd use our root .clang-tidy
+    FastCheckFilter: None
+    Remove:
+      # Suppress annoying / false-positive warnings in editor
+      - "*explicit-constructor"
+      - readability-named-parameter
+      - readability-convert-member-functions-to-static
+      - performance-trivially-destructible
+      - performance-enum-size
+      - bugprone-empty-catch
+      - bugprone-unchecked-optional-access
+
+  UnusedIncludes: None
