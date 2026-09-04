@@ -113,6 +113,35 @@ void CollectConsolidatedMetadata(const nlohmann::json& metadata, const std::stri
     }
 }
 
+Result<void> ApplyShardingLayout(const nlohmann::json& sharding, StorageLayout& layout, std::string_view node) {
+    layout.sharded = true;
+    layout.shard_shape = std::move(layout.chunk_shape);
+    layout.chunk_shape.clear();
+
+    if (sharding.contains("configuration") && sharding.at("configuration").is_object()) {
+        const auto& configuration = sharding.at("configuration");
+        if (configuration.contains("chunk_shape") && configuration.at("chunk_shape").is_array()) {
+            for (const auto& dimension : configuration.at("chunk_shape")) {
+                if (!zarr_metadata::IsPositiveInteger(dimension)) {
+                    return MakeError(ErrorCode::invalid_metadata,
+                                     "Sharding codec chunk_shape must be positive integers", std::string(node));
+                }
+                layout.chunk_shape.push_back(dimension.get<std::uint64_t>());
+            }
+        }
+        // The compressor applies to the inner chunks, so look inside the sharding codec first.
+        if (configuration.contains("codecs") && configuration.at("codecs").is_array()) {
+            layout.compressor = FindCompressor(&configuration.at("codecs"));
+        }
+    }
+
+    if (layout.chunk_shape.size() != layout.shard_shape.size()) {
+        return MakeError(ErrorCode::invalid_metadata, "Sharding codec chunk_shape must match the shard rank",
+                         std::string(node));
+    }
+    return {};
+}
+
 }  // namespace
 
 Store::Store(TransportPtr transport, nlohmann::json root_attributes,
@@ -315,31 +344,10 @@ Result<StorageLayout> Store::ReadStorageLayout(std::string_view node) const {
         codecs = &metadata.at("codecs");
     }
 
-    // In a sharded array the chunk grid describes the shard, and the sharding codec carries the
-    // inner chunk shape that reads actually address.
     if (const nlohmann::json* sharding = FindCodec(codecs, "sharding_indexed"); sharding != nullptr) {
-        layout.sharded = true;
-        layout.shard_shape = std::move(layout.chunk_shape);
-        layout.chunk_shape.clear();
-        if (sharding->contains("configuration") && sharding->at("configuration").is_object()) {
-            const auto& configuration = sharding->at("configuration");
-            if (configuration.contains("chunk_shape") && configuration.at("chunk_shape").is_array()) {
-                for (const auto& dimension : configuration.at("chunk_shape")) {
-                    if (!zarr_metadata::IsPositiveInteger(dimension)) {
-                        return MakeError(ErrorCode::invalid_metadata,
-                                         "Sharding codec chunk_shape must be positive integers", std::string(node));
-                    }
-                    layout.chunk_shape.push_back(dimension.get<std::uint64_t>());
-                }
-            }
-            // The compressor applies to the inner chunks, so look inside the sharding codec first.
-            if (configuration.contains("codecs") && configuration.at("codecs").is_array()) {
-                layout.compressor = FindCompressor(&configuration.at("codecs"));
-            }
-        }
-        if (layout.chunk_shape.size() != layout.shard_shape.size()) {
-            return MakeError(ErrorCode::invalid_metadata, "Sharding codec chunk_shape must match the shard rank",
-                             std::string(node));
+        auto sharding_result = ApplyShardingLayout(*sharding, layout, node);
+        if (!sharding_result) {
+            return sharding_result.error();
         }
     }
 

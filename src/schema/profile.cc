@@ -6,7 +6,7 @@
 
 #include "profile.h"
 
-#include "xradio/sky.h"
+#include "xradio/image.h"
 
 #include <algorithm>
 #include <utility>
@@ -26,8 +26,8 @@ bool Contains(const std::vector<std::string>& names, std::string_view name) {
 
 const std::vector<SchemaProfile::Entry>& SchemaProfile::BuiltIn() {
     static const std::vector<SchemaProfile::Entry> profiles{
-        {SchemaProfile::Entry{SchemaId(kXradioImageSchema), &xradio::ProbeSky, &xradio::DiscoverSkyImages,
-                              &xradio::DescribeSky, &xradio::ReadBeamsSky}}};
+        {SchemaProfile::Entry{SchemaId(kXradioImageSchema), &xradio::ProbeImage, &xradio::DiscoverImages,
+                              &xradio::DescribeImage, &xradio::ReadBeams}}};
     return profiles;
 }
 

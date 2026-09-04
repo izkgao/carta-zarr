@@ -537,7 +537,7 @@ void TestBeamTableTimePlanes(const std::filesystem::path& root) {
             "time did not vary slowest, so single-plane callers would see a different order");
 }
 
-// A beam table need not carry a time dimension; ReadBeamsSky treats an absent one as a single
+// A beam table need not carry a time dimension; ReadBeams treats an absent one as a single
 // implicit plane. Addressing the array must not insist on naming a dimension the array lacks.
 void TestBeamTableWithoutTimeDimension(const std::filesystem::path& root) {
     CreateValidStore(root);

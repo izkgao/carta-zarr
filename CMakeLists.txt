@@ -49,7 +49,7 @@ add_library(carta_zarr SHARED
     src/schema/profile.cc
     src/schema/xradio/probe_report.cc
     src/schema/xradio/linear_axis.cc
-    src/schema/xradio/sky.cc
+    src/schema/xradio/image.cc
     src/zarr/array_metadata.cc
     src/zarr/array_view.cc
     src/zarr/store_context.cc
@@ -157,7 +157,7 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         src/schema/profile.cc
         src/schema/xradio/probe_report.cc
         src/schema/xradio/linear_axis.cc
-        src/schema/xradio/sky.cc
+        src/schema/xradio/image.cc
         src/zarr/array_metadata.cc
         src/zarr/array_view.cc
         src/zarr/string_array.cc

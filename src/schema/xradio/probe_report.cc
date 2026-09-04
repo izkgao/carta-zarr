@@ -39,8 +39,11 @@ const std::vector<Diagnostic>& ProbeReport::diagnostics() const noexcept {
 }
 
 bool ProbeReport::RequireThat(bool condition, std::string code, std::string message, std::string node_path) {
-    if (!ok() || condition) {
-        return ok() && condition;
+    if (!ok()) {
+        return false;
+    }
+    if (condition) {
+        return true;
     }
     return Fail(std::move(code), std::move(message), std::move(node_path));
 }

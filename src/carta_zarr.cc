@@ -135,23 +135,22 @@ Result<Dataset> Dataset::Open(const Context& context, std::string_view location)
         if (!probe_result) {
             return probe_result.error();
         }
-        if (probe_result.value().kind != ProbeKind::supported_dataset) {
-            const auto& probe = probe_result.value();
+        const auto& probe = probe_result.value();
+        if (probe.kind != ProbeKind::supported_dataset) {
             const ErrorCode code =
                 probe.kind == ProbeKind::invalid_dataset ? ErrorCode::invalid_metadata : ErrorCode::unsupported_schema;
             return MakeError(code, "The Zarr store is not a supported XRADIO image dataset", std::string(location));
         }
 
-        const auto& supported_probe = probe_result.value();
-        if (supported_probe.image_ids.empty()) {
+        if (probe.image_ids.empty()) {
             return MakeError(ErrorCode::invalid_metadata, "Supported schema has no image variables",
                              std::string(location));
         }
         DatasetDescriptor descriptor;
-        descriptor.schema_id = supported_probe.schema_id;
-        descriptor.schema_version = supported_probe.schema_version;
-        descriptor.image_ids = supported_probe.image_ids;
-        descriptor.diagnostics = supported_probe.diagnostics;
+        descriptor.schema_id = probe.schema_id;
+        descriptor.schema_version = probe.schema_version;
+        descriptor.image_ids = probe.image_ids;
+        descriptor.diagnostics = probe.diagnostics;
         return Dataset{std::make_shared<Impl>(context._impl, std::string(location), std::move(descriptor),
                                               std::move(store_result.value()))};
     } catch (const std::exception& error) {
@@ -169,10 +168,14 @@ Result<Image> Dataset::OpenImage(std::string_view image_id) const {
         return MakeError(ErrorCode::invalid_argument, "Dataset handle is empty");
     }
     std::scoped_lock const lock(_impl->mutex);
-    const auto cached = _impl->image_descriptors.find(std::string(image_id));
-    if (cached != _impl->image_descriptors.end()) {
+    const std::string image_name(image_id);
+    const auto make_image = [&](const ImageDescriptor& descriptor) {
         return Image{std::make_shared<Image::Impl>(_impl->context, _impl->location, _impl->descriptor.schema_id,
-                                                   _impl->store, cached->second)};
+                                                   _impl->store, descriptor)};
+    };
+    const auto cached = _impl->image_descriptors.find(image_name);
+    if (cached != _impl->image_descriptors.end()) {
+        return make_image(cached->second);
     }
     auto profile = internal::SchemaProfile::For(_impl->descriptor.schema_id);
     if (!profile) {
@@ -182,9 +185,8 @@ Result<Image> Dataset::OpenImage(std::string_view image_id) const {
     if (!image_descriptor) {
         return image_descriptor.error();
     }
-    auto [inserted, _] = _impl->image_descriptors.emplace(std::string(image_id), std::move(image_descriptor.value()));
-    return Image{std::make_shared<Image::Impl>(_impl->context, _impl->location, _impl->descriptor.schema_id,
-                                               _impl->store, inserted->second)};
+    auto [inserted, _] = _impl->image_descriptors.emplace(image_name, std::move(image_descriptor.value()));
+    return make_image(inserted->second);
 }
 
 ProbeResult Probe(std::string_view location, const ProbeOptions&) {
