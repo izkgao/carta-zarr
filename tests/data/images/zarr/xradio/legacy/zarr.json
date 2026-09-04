@@ -1,0 +1,39 @@
+{
+  "attributes": {
+    "coordinate_system_info": {
+      "projection": "SIN",
+      "reference_direction": {
+        "data": [
+          1.0,
+          0.5
+        ],
+        "attrs": {
+          "frame": "fk5",
+          "equinox": "J2000"
+        }
+      },
+      "native_pole_direction": {
+        "data": [
+          0.0,
+          1.5707963267948966
+        ]
+      },
+      "projection_parameters": [
+        0.25,
+        -0.5
+      ],
+      "pixel_coordinate_transformation_matrix": [
+        [
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}
