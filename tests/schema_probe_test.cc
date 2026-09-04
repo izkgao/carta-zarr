@@ -319,6 +319,31 @@ void TestDiscoveryIgnoresNameAllowlist(const std::filesystem::path& root) {
     Require(static_cast<bool>(image), "unlisted sky-plane image was not openable");
 }
 
+void TestMetadataCache(const std::filesystem::path& root) {
+    CreateValidStore(root);
+    Write(root / "MODEL" / "zarr.json", SkyArray());
+
+    const auto context = carta::zarr::Context::Create();
+    Require(static_cast<bool>(context), "Context::Create failed for metadata cache");
+    const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
+    Require(static_cast<bool>(dataset), "Dataset::Open failed for metadata cache");
+    Require(static_cast<bool>(dataset.value().OpenImage("SKY")),
+            "initial image open failed while populating metadata cache");
+
+    // A Store is a read-only view. Once metadata has been observed, later schema operations must
+    // use the same snapshot instead of rereading a changed metadata file.
+    Write(root / "MODEL" / "zarr.json", "{not valid json");
+    const auto cached_model = dataset.value().OpenImage("MODEL");
+    Require(static_cast<bool>(cached_model), "cached metadata was not reused after the file changed");
+
+    // The node list is cached as well, so nodes created after the first discovery are not visible
+    // through an already-open Dataset.
+    Write(root / "NEW" / "zarr.json", SkyArray());
+    const auto new_image = dataset.value().OpenImage("NEW");
+    Require(!new_image && new_image.error().code == ErrorCode::not_found,
+            "metadata cache did not preserve the discovered node list");
+}
+
 void TestCoordinateCompletion(const std::filesystem::path& root) {
     CreateValidStore(root / "uniform");
     Write(root / "uniform" / "frequency" / "zarr.json",
@@ -462,6 +487,7 @@ int main() {
         TestCoordinateCompletion(root / "coordinates");
         TestAmbiguousPixelMask(root / "ambiguous-mask");
         TestDiscoveryIgnoresNameAllowlist(root / "unlisted-image");
+        TestMetadataCache(root / "metadata-cache");
         TestTypedDatasetWithoutSky(root / "typed-no-sky");
         TestDeclaredDatasetMissingTimeCoordinate(root / "typed-no-time");
         TestShardedStorageLayout(root / "sharded");

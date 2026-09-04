@@ -81,7 +81,10 @@ Result<bool> ValidateCoordinate(const Store& store, std::string_view name, std::
         return metadata_result.error();
     }
 
-    auto array_result = zarr_metadata::ParseArrayMetadata(metadata_result.value(), name);
+    // ReadArrayMetadata reuses both the raw metadata and parsed array metadata caches. Keeping
+    // the raw read above preserves the existing distinction between missing metadata diagnostics
+    // and other I/O errors.
+    auto array_result = store.ReadArrayMetadata(name);
     if (AddArrayMetadataError(array_result, result, node)) {
         return false;
     }

@@ -160,8 +160,9 @@ Result<::carta::zarr::internal::ImageDiscovery> DiscoverSkyImages(const Store& s
     }
 
     ::carta::zarr::internal::ImageDiscovery result;
-    for (const auto& [node, metadata] : nodes.value()) {
-        auto array_result = zarr_metadata::ParseArrayMetadata(metadata, node);
+    for (const auto& entry : nodes.value()) {
+        const auto& node = entry.first;
+        auto array_result = store.ReadArrayMetadata(node);
         if (!array_result) {
             continue;
         }
@@ -218,11 +219,7 @@ Result<SchemaProbeResult> ProbeSky(const Store& store) {
         result.kind = SchemaMatchKind::invalid;
 
         const auto& first_image = discovery.value().openable_image_ids.front();
-        auto metadata_result = store.ReadNodeMetadata(first_image);
-        if (!metadata_result) {
-            return metadata_result.error();
-        }
-        auto array_result = zarr_metadata::ParseArrayMetadata(metadata_result.value(), first_image);
+        auto array_result = store.ReadArrayMetadata(first_image);
         if (AddArrayMetadataError(array_result, result, first_image)) {
             return result;
         }
@@ -258,7 +255,7 @@ Result<SchemaProbeResult> ProbeSky(const Store& store) {
     }
 
     result.kind = SchemaMatchKind::invalid;
-    auto sky_result = zarr_metadata::ParseArrayMetadata(sky_metadata_result.value(), "SKY");
+    auto sky_result = store.ReadArrayMetadata("SKY");
     if (AddArrayMetadataError(sky_result, result, "SKY")) {
         return result;
     }
@@ -316,11 +313,7 @@ Result<SchemaProbeResult> ProbeSky(const Store& store) {
 }
 
 Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_id) {
-    auto metadata_result = store.ReadNodeMetadata(image_id);
-    if (!metadata_result) {
-        return metadata_result.error();
-    }
-    auto array_result = zarr_metadata::ParseArrayMetadata(metadata_result.value(), image_id);
+    auto array_result = store.ReadArrayMetadata(image_id);
     if (!array_result) {
         return array_result.error();
     }
@@ -371,12 +364,9 @@ Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_i
             continue;
         }
         std::string unit;
-        auto coordinate_metadata = store.ReadNodeMetadata(name);
+        auto coordinate_metadata = store.ReadArrayMetadata(name);
         if (coordinate_metadata) {
-            auto coordinate_array = zarr_metadata::ParseArrayMetadata(coordinate_metadata.value(), name);
-            if (coordinate_array) {
-                unit = AttributeString(coordinate_array.value().attributes, "units");
-            }
+            unit = AttributeString(coordinate_metadata.value().attributes, "units");
         }
         descriptor.axes.push_back(
             AxisDescriptor{std::string(name), role, image.shape[*index], std::move(unit), *index});
@@ -660,8 +650,9 @@ Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_i
             return nodes.error();
         }
         std::vector<std::string> matching_flags;
-        for (const auto& [node, metadata] : nodes.value()) {
-            auto flag_array = zarr_metadata::ParseArrayMetadata(metadata, node);
+        for (const auto& entry : nodes.value()) {
+            const auto& node = entry.first;
+            auto flag_array = store.ReadArrayMetadata(node);
             if (!flag_array || !IsFlag(flag_array.value()) || flag_array.value().shape != image.shape) {
                 continue;
             }
@@ -695,11 +686,7 @@ Result<std::vector<Beam>> ReadBeamsSky(const Store& store, std::string_view imag
         return std::vector<Beam>{};
     }
 
-    auto beam_meta = store.ReadNodeMetadata(beam_array_name);
-    if (!beam_meta) {
-        return beam_meta.error();
-    }
-    auto beam_arr_res = zarr_metadata::ParseArrayMetadata(beam_meta.value(), beam_array_name);
+    auto beam_arr_res = store.ReadArrayMetadata(beam_array_name);
     if (!beam_arr_res) {
         return beam_arr_res.error();
     }
