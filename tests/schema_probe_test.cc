@@ -46,6 +46,19 @@ void WriteDoubles(const std::filesystem::path& path, const std::vector<double>& 
     Require(static_cast<bool>(output), "Unable to finish writing " + path.string());
 }
 
+void WriteUtf32(const std::filesystem::path& path, const std::vector<std::string>& values, std::size_t code_points) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary);
+    Require(output.is_open(), "Unable to write " + path.string());
+    for (const auto& value : values) {
+        for (std::size_t index = 0; index < code_points; ++index) {
+            const std::uint32_t code_point = index < value.size() ? static_cast<std::uint32_t>(value[index]) : 0U;
+            output.write(reinterpret_cast<const char*>(&code_point), sizeof(code_point));
+        }
+    }
+    Require(static_cast<bool>(output), "Unable to finish writing " + path.string());
+}
+
 bool HasDiagnostic(const std::vector<carta::zarr::Diagnostic>& diagnostics, const std::string& code) {
     return std::any_of(diagnostics.begin(), diagnostics.end(),
                        [&](const auto& diagnostic) { return diagnostic.code == code; });
@@ -259,6 +272,10 @@ void TestReferenceFixture() {
     Require(!desc.spectral->reference_pixel.has_value() && !desc.spectral->reference_value.has_value() &&
                 !desc.spectral->increment.has_value(),
             "nonuniform spectral coordinates incorrectly exposed a linear description");
+    // Withholding the linear description is not enough on its own: per ADR-0002 the consumer has to
+    // know it must build a tabular axis, so the reason is reported rather than left silent.
+    Require(HasDiagnostic(desc.diagnostics, "nonuniform_axis"),
+            "nonuniform spectral coordinates did not report why they carry no linear description");
     Require(desc.polarization.has_value(), "PolarizationCoordinate missing in reference fixture");
     Require(!desc.polarization->labels.empty(), "Polarization labels empty in reference fixture");
     Require(desc.temporal.has_value(), "TemporalCoordinate missing in reference fixture");
@@ -400,6 +417,176 @@ void TestAmbiguousPixelMask(const std::filesystem::path& root) {
             "ambiguous flags did not produce a diagnostic");
 }
 
+// The beam table is a four-dimensional array read through a flat buffer, and until this test the
+// only thing pinning that indexing was "ReadBeams did not fail". The conformance fixture cannot
+// pin it either: every one of its six (frequency, polarization) planes holds the same triple, so
+// transposing two strides would go unnoticed. This store gives every plane and parameter a value
+// that identifies it: major = 100*frequency + 10*polarization, and minor and the position angle
+// one and two above it.
+void TestBeamTableIndexing(const std::filesystem::path& root) {
+    CreateValidStore(root);
+    Write(root / "SKY" / "zarr.json",
+          "{\"shape\":[1,3,2,4,5],\"data_type\":\"float32\",\"chunk_grid\":{\"name\":\"regular\","
+          "\"configuration\":{\"chunk_shape\":[1,1,1,2,5]}},"
+          "\"attributes\":{\"units\":\"Jy/beam\",\"beam_fit_params\":\"BEAM\"},"
+          "\"dimension_names\":[\"time\",\"frequency\",\"polarization\",\"l\",\"m\"],"
+          "\"zarr_format\":3,\"node_type\":\"array\"}");
+
+    // (time, frequency, polarization, beam_params_label) = (1, 3, 2, 3), C order.
+    Write(root / "BEAM" / "zarr.json",
+          NumericArray("[1,3,2,3]", R"(["time","frequency","polarization","beam_params_label"])", "float64",
+                       R"({"units":"rad"})"));
+    std::vector<double> beam_values;
+    for (std::uint64_t frequency = 0; frequency < 3; ++frequency) {
+        for (std::uint64_t polarization = 0; polarization < 2; ++polarization) {
+            const double base = (100.0 * static_cast<double>(frequency)) + (10.0 * static_cast<double>(polarization));
+            beam_values.push_back(base);
+            beam_values.push_back(base + 1.0);
+            beam_values.push_back(base + 2.0);
+        }
+    }
+    WriteDoubles(root / "BEAM" / "c" / "0" / "0" / "0" / "0", beam_values);
+
+    // Labels are deliberately not in major/minor/pa order: the reader must locate a parameter by its
+    // label, not by its position.
+    Write(root / "beam_params_label" / "zarr.json",
+          R"({"shape":[3],"data_type":{"name":"fixed_length_utf32","configuration":{"length_bytes":24}},
+              "chunk_grid":{"name":"regular","configuration":{"chunk_shape":[3]}},"attributes":{},
+              "dimension_names":["beam_params_label"],"zarr_format":3,"node_type":"array"})");
+    WriteUtf32(root / "beam_params_label" / "c" / "0", {"minor", "major", "pa"}, 6);
+
+    const auto context = carta::zarr::Context::Create();
+    Require(static_cast<bool>(context), "Context::Create failed for the beam table");
+    const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
+    Require(static_cast<bool>(dataset), "Dataset::Open failed for the beam table");
+    const auto image = dataset.value().OpenImage("SKY");
+    Require(static_cast<bool>(image), "OpenImage failed for the beam table");
+
+    const auto beams = image.value().ReadBeams();
+    Require(static_cast<bool>(beams),
+            "ReadBeams failed on the beam table" + (beams ? std::string{} : ": " + beams.error().message));
+    Require(beams.value().size() == 6, "the beam table did not decode one beam per frequency and polarization");
+
+    for (const auto& beam : beams.value()) {
+        const double base =
+            (100.0 * static_cast<double>(beam.channel)) + (10.0 * static_cast<double>(beam.polarization));
+        // Labels are stored as minor, major, pa, so major sits one past the plane's base value.
+        Require(beam.major == base + 1.0, "beam major was read from the wrong element");
+        Require(beam.minor == base, "beam minor was read from the wrong element");
+        Require(beam.position_angle == base + 2.0, "beam position angle was read from the wrong element");
+        Require(beam.unit == "rad", "beam unit was not read from the beam array attributes");
+    }
+}
+
+// A beam table with more than one time plane used to be read as its first plane only, silently.
+// ADR-0002 has the library report the whole time axis and leave any selection to the consumer, and
+// beams now follow that too. Time varies slowest, so a single-plane table is unaffected.
+void TestBeamTableTimePlanes(const std::filesystem::path& root) {
+    CreateValidStore(root);
+    Write(root / "SKY" / "zarr.json",
+          "{\"shape\":[1,3,2,4,5],\"data_type\":\"float32\",\"chunk_grid\":{\"name\":\"regular\","
+          "\"configuration\":{\"chunk_shape\":[1,1,1,2,5]}},"
+          "\"attributes\":{\"units\":\"Jy/beam\",\"beam_fit_params\":\"BEAM\"},"
+          "\"dimension_names\":[\"time\",\"frequency\",\"polarization\",\"l\",\"m\"],"
+          "\"zarr_format\":3,\"node_type\":\"array\"}");
+
+    // (time, frequency, polarization, beam_params_label) = (2, 3, 2, 3), C order.
+    Write(root / "BEAM" / "zarr.json",
+          NumericArray("[2,3,2,3]", R"(["time","frequency","polarization","beam_params_label"])", "float64",
+                       R"({"units":"rad"})"));
+    std::vector<double> beam_values;
+    for (std::uint64_t time = 0; time < 2; ++time) {
+        for (std::uint64_t frequency = 0; frequency < 3; ++frequency) {
+            for (std::uint64_t polarization = 0; polarization < 2; ++polarization) {
+                const double base = (1000.0 * static_cast<double>(time)) + (100.0 * static_cast<double>(frequency)) +
+                                    (10.0 * static_cast<double>(polarization));
+                beam_values.push_back(base);
+                beam_values.push_back(base + 1.0);
+                beam_values.push_back(base + 2.0);
+            }
+        }
+    }
+    WriteDoubles(root / "BEAM" / "c" / "0" / "0" / "0" / "0", beam_values);
+    Write(root / "beam_params_label" / "zarr.json",
+          R"({"shape":[3],"data_type":{"name":"fixed_length_utf32","configuration":{"length_bytes":24}},
+              "chunk_grid":{"name":"regular","configuration":{"chunk_shape":[3]}},"attributes":{},
+              "dimension_names":["beam_params_label"],"zarr_format":3,"node_type":"array"})");
+    WriteUtf32(root / "beam_params_label" / "c" / "0", {"minor", "major", "pa"}, 6);
+
+    const auto context = carta::zarr::Context::Create();
+    const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
+    Require(static_cast<bool>(dataset), "Dataset::Open failed for the multi-plane beam table");
+    const auto image = dataset.value().OpenImage("SKY");
+    Require(static_cast<bool>(image), "OpenImage failed for the multi-plane beam table");
+
+    const auto beams = image.value().ReadBeams();
+    Require(static_cast<bool>(beams), "ReadBeams failed on the multi-plane beam table");
+    Require(beams.value().size() == 12, "the multi-plane beam table did not report every plane");
+
+    for (const auto& beam : beams.value()) {
+        const double base = (1000.0 * static_cast<double>(beam.time)) + (100.0 * static_cast<double>(beam.channel)) +
+                            (10.0 * static_cast<double>(beam.polarization));
+        Require(beam.major == base + 1.0, "beam major was read from the wrong time plane");
+        Require(beam.minor == base, "beam minor was read from the wrong time plane");
+        Require(beam.position_angle == base + 2.0, "beam position angle was read from the wrong time plane");
+    }
+
+    // The first plane still reads back exactly as it did when it was all that was reported.
+    Require(beams.value().front().time == 0 && beams.value().front().channel == 0 &&
+                beams.value().front().polarization == 0,
+            "time did not vary slowest, so single-plane callers would see a different order");
+}
+
+// A beam table need not carry a time dimension; ReadBeamsSky treats an absent one as a single
+// implicit plane. Addressing the array must not insist on naming a dimension the array lacks.
+void TestBeamTableWithoutTimeDimension(const std::filesystem::path& root) {
+    CreateValidStore(root);
+    Write(root / "SKY" / "zarr.json",
+          "{\"shape\":[1,3,2,4,5],\"data_type\":\"float32\",\"chunk_grid\":{\"name\":\"regular\","
+          "\"configuration\":{\"chunk_shape\":[1,1,1,2,5]}},"
+          "\"attributes\":{\"units\":\"Jy/beam\",\"beam_fit_params\":\"BEAM\"},"
+          "\"dimension_names\":[\"time\",\"frequency\",\"polarization\",\"l\",\"m\"],"
+          "\"zarr_format\":3,\"node_type\":\"array\"}");
+
+    // (frequency, polarization, beam_params_label) = (3, 2, 3) -- no time dimension at all.
+    Write(root / "BEAM" / "zarr.json", NumericArray("[3,2,3]", R"(["frequency","polarization","beam_params_label"])",
+                                                    "float64", R"({"units":"rad"})"));
+    std::vector<double> beam_values;
+    for (std::uint64_t frequency = 0; frequency < 3; ++frequency) {
+        for (std::uint64_t polarization = 0; polarization < 2; ++polarization) {
+            const double base = (100.0 * static_cast<double>(frequency)) + (10.0 * static_cast<double>(polarization));
+            beam_values.push_back(base);
+            beam_values.push_back(base + 1.0);
+            beam_values.push_back(base + 2.0);
+        }
+    }
+    WriteDoubles(root / "BEAM" / "c" / "0" / "0" / "0", beam_values);
+    Write(root / "beam_params_label" / "zarr.json",
+          R"({"shape":[3],"data_type":{"name":"fixed_length_utf32","configuration":{"length_bytes":24}},
+              "chunk_grid":{"name":"regular","configuration":{"chunk_shape":[3]}},"attributes":{},
+              "dimension_names":["beam_params_label"],"zarr_format":3,"node_type":"array"})");
+    WriteUtf32(root / "beam_params_label" / "c" / "0", {"minor", "major", "pa"}, 6);
+
+    const auto context = carta::zarr::Context::Create();
+    const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
+    Require(static_cast<bool>(dataset), "Dataset::Open failed for the time-less beam table");
+    const auto image = dataset.value().OpenImage("SKY");
+    Require(static_cast<bool>(image), "OpenImage failed for the time-less beam table");
+
+    const auto beams = image.value().ReadBeams();
+    Require(static_cast<bool>(beams), "a beam table without a time dimension was not readable" +
+                                          (beams ? std::string{} : ": " + beams.error().message));
+    Require(beams.value().size() == 6, "the time-less beam table did not report one beam per plane");
+    for (const auto& beam : beams.value()) {
+        const double base =
+            (100.0 * static_cast<double>(beam.channel)) + (10.0 * static_cast<double>(beam.polarization));
+        Require(beam.time == 0, "a beam table without a time dimension reported a nonzero time index");
+        Require(beam.major == base + 1.0, "beam major was misaddressed without a time dimension");
+        Require(beam.minor == base, "beam minor was misaddressed without a time dimension");
+        Require(beam.position_angle == base + 2.0, "beam position angle was misaddressed without a time dimension");
+    }
+}
+
 // A sharded array grids its store by shard; the inner chunk shape lives in the sharding codec.
 // A dataset that declares itself but has no SKY is still a valid image dataset. This is the case
 // the declared root marker exists for: structural detection looks for SKY and would reject it.
@@ -491,6 +678,9 @@ int main() {
         TestTypedDatasetWithoutSky(root / "typed-no-sky");
         TestDeclaredDatasetMissingTimeCoordinate(root / "typed-no-time");
         TestShardedStorageLayout(root / "sharded");
+        TestBeamTableIndexing(root / "beam-table");
+        TestBeamTableTimePlanes(root / "beam-time");
+        TestBeamTableWithoutTimeDimension(root / "beam-notime");
         TestReferenceFixture();
         TestLegacyFixture();
         std::filesystem::remove_all(root);

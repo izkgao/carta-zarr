@@ -6,7 +6,7 @@
 
 #include "carta-zarr/carta_zarr.h"
 
-#include "schema/registry.h"
+#include "schema/profile.h"
 #include "store.h"
 #include "zarr/array_metadata.h"
 #include "zarr/store_context.h"
@@ -94,7 +94,11 @@ Result<std::vector<Beam>> Image::ReadBeams() const {
     if (!_impl->store) {
         return MakeError(ErrorCode::invalid_argument, "Image store is unavailable");
     }
-    return internal::ReadBeamsFromSchema(*_impl->store, _impl->schema_id, _impl->descriptor.id);
+    auto profile = internal::SchemaProfile::For(_impl->schema_id);
+    if (!profile) {
+        return profile.error();
+    }
+    return profile.value().ReadBeams(*_impl->store, _impl->descriptor.id);
 }
 
 class Dataset::Impl {
@@ -170,7 +174,11 @@ Result<Image> Dataset::OpenImage(std::string_view image_id) const {
         return Image{std::make_shared<Image::Impl>(_impl->context, _impl->location, _impl->descriptor.schema_id,
                                                    _impl->store, cached->second)};
     }
-    auto image_descriptor = internal::DescribeSchema(*_impl->store, _impl->descriptor.schema_id, image_id);
+    auto profile = internal::SchemaProfile::For(_impl->descriptor.schema_id);
+    if (!profile) {
+        return profile.error();
+    }
+    auto image_descriptor = profile.value().Describe(*_impl->store, image_id);
     if (!image_descriptor) {
         return image_descriptor.error();
     }
@@ -212,19 +220,17 @@ ProbeResult Probe(std::string_view location, const ProbeOptions&) {
 
 Result<SchemaProbeResult> ProbeSchema(std::string_view location, std::string_view schema_id) {
     try {
-        const auto& adapters = internal::SchemaRegistry();
-        const auto known_schema =
-            std::find_if(adapters.begin(), adapters.end(),
-                         [&](const internal::SchemaAdapter& adapter) { return adapter.id == schema_id; });
-        if (known_schema == adapters.end()) {
-            return MakeError(ErrorCode::unsupported_schema,
-                             "No built-in adapter exists for schema " + std::string(schema_id));
+        // Resolve the profile before touching the store, so an unknown schema reports itself rather
+        // than whatever happens to be wrong with the path.
+        auto profile = internal::SchemaProfile::For(schema_id);
+        if (!profile) {
+            return profile.error();
         }
         auto store_result = internal::OpenStore(location);
         if (!store_result) {
             return store_result.error();
         }
-        return internal::ProbeSchemaFromRegistry(store_result.value(), schema_id);
+        return profile.value().Probe(store_result.value());
     } catch (const std::exception& error) {
         return MakeError(ErrorCode::invalid_metadata, error.what(), std::string(location));
     }

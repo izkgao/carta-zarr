@@ -152,6 +152,9 @@ struct StorageLayout {
 };
 
 struct Beam {
+    // The plane this beam was fitted on. Every plane is reported, as ADR-0002 requires of the time
+    // axis generally; a consumer that handles one time step selects it rather than being handed it.
+    std::size_t time = 0;
     std::size_t channel = 0;
     std::size_t polarization = 0;
     double major = 0.0;

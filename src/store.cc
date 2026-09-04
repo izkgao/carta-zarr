@@ -7,22 +7,12 @@
 #include "store.h"
 
 #include "zarr/array_metadata.h"
-#include "zarr/store_context.h"
 #include "zarr/string_array.h"
-
-#include <tensorstore/array.h>
-#include <tensorstore/context.h>
-#include <tensorstore/open.h>
-#include <tensorstore/open_mode.h>
-#include <tensorstore/spec.h>
-#include <tensorstore/static_cast.h>
-#include <tensorstore/tensorstore.h>
-#include <tensorstore/util/result.h>
+#include "zarr/transport.h"
+#include "zarr/value_reader.h"
 
 #include <algorithm>
 #include <array>
-#include <fstream>
-#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -37,36 +27,11 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
     return Error{code, std::move(message), std::move(node_path)};
 }
 
-Result<std::filesystem::path> NormalizeLocation(std::string_view location) {
-    if (location.empty()) {
-        return MakeError(ErrorCode::invalid_argument, "Zarr location must not be empty");
-    }
-
-    std::string const location_string(location);
-    std::filesystem::path path;
-    if (location_string.rfind("file://", 0) == 0) {
-        path = std::filesystem::path(location_string.substr(7));
-    } else if (location_string.find("://") != std::string::npos) {
-        return MakeError(ErrorCode::unsupported_transport,
-                         "Only local filesystem and file:// Zarr stores are supported");
-    } else {
-        path = std::filesystem::path(location_string);
-    }
-
-    if (path.empty()) {
-        return MakeError(ErrorCode::invalid_argument, "Zarr location must not be empty");
-    }
-    return path;
-}
-
-Result<nlohmann::json> ReadJsonFile(const std::filesystem::path& path, std::string_view node_path) {
-    std::ifstream input(path);
-    if (!input.is_open()) {
-        return MakeError(ErrorCode::io_error, "Unable to read Zarr metadata", std::string(node_path));
-    }
-
+// Parse metadata bytes handed up by a Transport. Parsing lives above the seam so that every
+// Transport reports a malformed node the same way.
+Result<nlohmann::json> ParseNodeMetadata(const std::string& bytes, std::string_view node_path) {
     try {
-        return nlohmann::json::parse(input);
+        return nlohmann::json::parse(bytes);
     } catch (const nlohmann::json::parse_error& error) {
         return MakeError(ErrorCode::invalid_metadata, "Invalid JSON in Zarr metadata: " + std::string(error.what()),
                          std::string(node_path));
@@ -74,6 +39,21 @@ Result<nlohmann::json> ReadJsonFile(const std::filesystem::path& path, std::stri
         return MakeError(ErrorCode::io_error, "Unable to read Zarr metadata: " + std::string(error.what()),
                          std::string(node_path));
     }
+}
+
+// A node name is a relative path carrying no ".." component. Validating it here rather than in a
+// Transport holds every Transport to the same rule, and yields the key the caches are stored under.
+Result<std::string> NormalizeNodeName(std::string_view node) {
+    const std::filesystem::path relative(node);
+    if (relative.empty() || relative.is_absolute() || relative.has_root_path()) {
+        return MakeError(ErrorCode::invalid_argument, "Invalid Zarr node path", std::string(node));
+    }
+    for (const auto& part : relative) {
+        if (part == "..") {
+            return MakeError(ErrorCode::invalid_argument, "Invalid Zarr node path", std::string(node));
+        }
+    }
+    return relative.generic_string();
 }
 
 // Return the named codec from a Zarr v3 codec chain, or nullptr when it is absent.
@@ -99,20 +79,6 @@ std::string FindCompressor(const nlohmann::json* codecs) {
         }
     }
     return {};
-}
-
-std::filesystem::path ResolveArrayPath(const std::filesystem::path& root_path, std::string_view array_name) {
-    const std::filesystem::path relative_path(array_name);
-    if (relative_path.is_absolute() || relative_path.has_root_name() ||
-        array_name.find('\\') != std::string_view::npos) {
-        throw std::runtime_error("Invalid Zarr array path " + std::string(array_name));
-    }
-    for (const auto& component : relative_path) {
-        if (component == "." || component == "..") {
-            throw std::runtime_error("Invalid Zarr array path " + std::string(array_name));
-        }
-    }
-    return root_path / relative_path;
 }
 
 std::string NormalizeMetadataKey(std::string key) {
@@ -149,280 +115,163 @@ void CollectConsolidatedMetadata(const nlohmann::json& metadata, const std::stri
 
 }  // namespace
 
+Store::Store(TransportPtr transport, nlohmann::json root_attributes,
+             std::map<std::string, nlohmann::json> consolidated_metadata, bool has_consolidated_metadata,
+             StoreContextPtr context)
+    : _transport(std::move(transport)),
+      _root_attributes(std::move(root_attributes)),
+      _consolidated_metadata(std::move(consolidated_metadata)),
+      _has_consolidated_metadata(has_consolidated_metadata),
+      _context(std::move(context)),
+      _caches(std::make_shared<StoreCaches>()) {}
+
 Result<Store> OpenStore(std::string_view location, StoreContextPtr context) {
-    auto path_result = NormalizeLocation(location);
-    if (!path_result) {
-        return path_result.error();
+    auto transport = OpenFilesystemTransport(location);
+    if (!transport) {
+        return transport.error();
     }
-    const std::filesystem::path& path = path_result.value();
+    return OpenStore(std::move(transport.value()), std::move(context));
+}
 
-    std::error_code error;
-    if (!std::filesystem::exists(path, error)) {
-        if (error) {
-            return MakeError(ErrorCode::io_error, "Unable to inspect Zarr location: " + error.message());
+Result<Store> OpenStore(TransportPtr transport, StoreContextPtr context) {
+    if (!transport) {
+        return MakeError(ErrorCode::invalid_argument, "Zarr transport must not be null");
+    }
+
+    auto bytes = transport->ReadNodeBytes({});
+    if (!bytes) {
+        // A transport with no root node is not a Zarr store at all, whatever else it holds.
+        if (bytes.error().code == ErrorCode::not_found) {
+            return MakeError(ErrorCode::not_zarr, "Zarr store is missing zarr.json", bytes.error().node_path);
         }
-        return MakeError(ErrorCode::not_found, "Zarr location does not exist", path.string());
-    }
-    if (error || !std::filesystem::is_directory(path, error)) {
-        return MakeError(ErrorCode::not_zarr, "Zarr location is not a directory", path.string());
+        return bytes.error();
     }
 
-    const std::filesystem::path metadata_path = path / "zarr.json";
-    if (!std::filesystem::exists(metadata_path, error)) {
-        return MakeError(ErrorCode::not_zarr, "Zarr store is missing zarr.json", metadata_path.string());
-    }
-    if (error) {
-        return MakeError(ErrorCode::io_error, "Unable to inspect Zarr metadata: " + error.message(),
-                         metadata_path.string());
-    }
-
-    auto metadata_result = ReadJsonFile(metadata_path, metadata_path.string());
+    auto metadata_result = ParseNodeMetadata(bytes.value(), "zarr.json");
     if (!metadata_result) {
         return metadata_result.error();
     }
     const nlohmann::json& metadata = metadata_result.value();
     if (!metadata.is_object()) {
-        return MakeError(ErrorCode::invalid_metadata, "Root Zarr metadata must be a JSON object",
-                         metadata_path.string());
+        return MakeError(ErrorCode::invalid_metadata, "Root Zarr metadata must be a JSON object", "zarr.json");
     }
     if (!metadata.contains("zarr_format") ||
         !::carta::zarr::internal::zarr::IsNonNegativeInteger(metadata["zarr_format"])) {
-        return MakeError(ErrorCode::invalid_metadata, "Root Zarr metadata has no valid zarr_format",
-                         metadata_path.string());
+        return MakeError(ErrorCode::invalid_metadata, "Root Zarr metadata has no valid zarr_format", "zarr.json");
     }
     if (metadata["zarr_format"].get<std::uint64_t>() != 3) {
-        return MakeError(ErrorCode::unsupported_zarr_version, "Only Zarr format 3 is supported",
-                         metadata_path.string());
+        return MakeError(ErrorCode::unsupported_zarr_version, "Only Zarr format 3 is supported", "zarr.json");
     }
     if (metadata.value("node_type", "") != "group") {
-        return MakeError(ErrorCode::not_zarr, "The Zarr root must be a group", metadata_path.string());
+        return MakeError(ErrorCode::not_zarr, "The Zarr root must be a group", "zarr.json");
     }
 
-    Store store{path, metadata, std::move(context)};
-    store.coordinate_cache = std::make_shared<SharedCoordinateCache>();
-    store.metadata_cache = std::make_shared<SharedMetadataCache>();
+    std::map<std::string, nlohmann::json> consolidated;
+    bool has_consolidated = false;
     if (metadata.contains("consolidated_metadata")) {
-        const auto& consolidated = metadata.at("consolidated_metadata");
-        if (!consolidated.is_object() || !consolidated.contains("metadata") ||
-            !consolidated.at("metadata").is_object()) {
+        const auto& block = metadata.at("consolidated_metadata");
+        if (!block.is_object() || !block.contains("metadata") || !block.at("metadata").is_object()) {
             return MakeError(ErrorCode::invalid_metadata,
-                             "Zarr consolidated_metadata must contain an object metadata member",
-                             metadata_path.string());
+                             "Zarr consolidated_metadata must contain an object metadata member", "zarr.json");
         }
-        store.has_consolidated_metadata = true;
-        CollectConsolidatedMetadata(consolidated.at("metadata"), {}, store.consolidated_metadata);
+        has_consolidated = true;
+        CollectConsolidatedMetadata(block.at("metadata"), {}, consolidated);
     }
-    return store;
+
+    return Store{std::move(transport), metadata.value("attributes", nlohmann::json::object()), std::move(consolidated),
+                 has_consolidated, std::move(context)};
+}
+
+const nlohmann::json& Store::RootAttributes() const noexcept {
+    return _root_attributes;
 }
 
 Result<nlohmann::json> Store::ReadNodeMetadata(std::string_view node) const {
-    const std::filesystem::path relative(node);
-    if (relative.empty() || relative.is_absolute() || relative.has_root_path()) {
-        return MakeError(ErrorCode::invalid_argument, "Invalid Zarr node path", std::string(node));
+    auto node_name_result = NormalizeNodeName(node);
+    if (!node_name_result) {
+        return node_name_result.error();
     }
-    for (const auto& part : relative) {
-        if (part == "..") {
-            return MakeError(ErrorCode::invalid_argument, "Invalid Zarr node path", std::string(node));
-        }
-    }
+    const std::string node_name = std::move(node_name_result.value());
 
-    const std::string node_name = relative.generic_string();
-
-    const auto read_metadata = [&]() -> Result<nlohmann::json> {
-        if (has_consolidated_metadata) {
-            const auto found = consolidated_metadata.find(node_name);
-            if (found != consolidated_metadata.end()) {
+    return _caches->node_metadata.GetOrCompute(node_name, [&]() -> Result<nlohmann::json> {
+        if (_has_consolidated_metadata) {
+            const auto found = _consolidated_metadata.find(node_name);
+            if (found != _consolidated_metadata.end()) {
                 return found->second;
             }
         }
 
-        const std::filesystem::path metadata_path = root / relative / "zarr.json";
-        std::error_code error;
-        if (!std::filesystem::exists(metadata_path, error)) {
-            if (error) {
-                return MakeError(ErrorCode::io_error, "Unable to inspect Zarr node metadata: " + error.message(),
-                                 std::string(node));
-            }
-            return MakeError(ErrorCode::not_found, "Zarr node is missing zarr.json", std::string(node));
+        auto bytes = _transport->ReadNodeBytes(node_name);
+        if (!bytes) {
+            return bytes.error();
         }
-        return ReadJsonFile(metadata_path, node);
-    };
-
-    if (metadata_cache) {
-        // Hold the cache lock while loading a node. Metadata files are small, and this prevents
-        // concurrent schema operations from reading and parsing the same file more than once.
-        std::scoped_lock const lock(metadata_cache->mutex);
-        const auto found = metadata_cache->node_metadata.find(node_name);
-        if (found != metadata_cache->node_metadata.end()) {
-            return found->second;
-        }
-        auto result = read_metadata();
-        const auto insertion = metadata_cache->node_metadata.emplace(node_name, std::move(result));
-        return insertion.first->second;
-    }
-    return read_metadata();
+        return ParseNodeMetadata(bytes.value(), node);
+    });
 }
 
 Result<zarr::ArrayMetadata> Store::ReadArrayMetadata(std::string_view node) const {
-    const std::string node_name(node);
-    if (metadata_cache) {
-        std::scoped_lock const lock(metadata_cache->mutex);
-        const auto found = metadata_cache->array_metadata.find(node_name);
-        if (found != metadata_cache->array_metadata.end()) {
-            return found->second;
+    return _caches->array_metadata.GetOrCompute(std::string(node), [&]() -> Result<zarr::ArrayMetadata> {
+        auto metadata_result = ReadNodeMetadata(node);
+        if (!metadata_result) {
+            return metadata_result.error();
         }
-    }
-
-    auto metadata_result = ReadNodeMetadata(node);
-    if (!metadata_result) {
-        return metadata_result.error();
-    }
-    auto result = zarr_metadata::ParseArrayMetadata(metadata_result.value(), node);
-    if (metadata_cache) {
-        std::scoped_lock const lock(metadata_cache->mutex);
-        const auto insertion = metadata_cache->array_metadata.emplace(node_name, std::move(result));
-        return insertion.first->second;
-    }
-    return result;
+        return zarr_metadata::ParseArrayMetadata(metadata_result.value(), node);
+    });
 }
 
 Result<std::vector<std::pair<std::string, nlohmann::json>>> Store::ListNodeMetadata() const {
-    if (metadata_cache) {
-        std::scoped_lock const lock(metadata_cache->mutex);
-        if (metadata_cache->listed_metadata.has_value()) {
-            return *metadata_cache->listed_metadata;
-        }
-    }
-
-    std::vector<std::string> node_names;
-    if (has_consolidated_metadata) {
-        node_names.reserve(consolidated_metadata.size());
-        for (const auto& [node, _] : consolidated_metadata) {
-            node_names.push_back(node);
-        }
-    } else {
-        std::error_code error;
-        std::filesystem::recursive_directory_iterator iterator(
-            root, std::filesystem::directory_options::skip_permission_denied, error);
-        const std::filesystem::recursive_directory_iterator end;
-        for (; iterator != end; iterator.increment(error)) {
-            if (error) {
-                return MakeError(ErrorCode::io_error, "Unable to enumerate Zarr metadata: " + error.message(),
-                                 root.string());
+    using Listing = Result<std::vector<std::pair<std::string, nlohmann::json>>>;
+    return _caches->listed_metadata.GetOrCompute([&]() -> Listing {
+        std::vector<std::string> node_names;
+        if (_has_consolidated_metadata) {
+            node_names.reserve(_consolidated_metadata.size());
+            for (const auto& [node, _] : _consolidated_metadata) {
+                node_names.push_back(node);
             }
-            if (!iterator->is_regular_file(error) || error || iterator->path().filename() != "zarr.json") {
-                continue;
+        } else {
+            auto listed = _transport->ListNodes();
+            if (!listed) {
+                return listed.error();
             }
-            const auto relative_parent = std::filesystem::relative(iterator->path().parent_path(), root, error);
-            if (error) {
-                return MakeError(ErrorCode::io_error, "Unable to enumerate Zarr metadata: " + error.message(),
-                                 iterator->path().string());
+            node_names = std::move(listed.value());
+        }
+
+        std::sort(node_names.begin(), node_names.end());
+        node_names.erase(std::unique(node_names.begin(), node_names.end()), node_names.end());
+
+        std::vector<std::pair<std::string, nlohmann::json>> result;
+        result.reserve(node_names.size());
+        for (const auto& node : node_names) {
+            auto metadata = ReadNodeMetadata(node);
+            if (!metadata) {
+                return metadata.error();
             }
-            if (relative_parent.empty() || relative_parent == ".") {
-                continue;
-            }
-            node_names.push_back(relative_parent.generic_string());
+            result.emplace_back(node, std::move(metadata.value()));
         }
-        if (error) {
-            return MakeError(ErrorCode::io_error, "Unable to enumerate Zarr metadata: " + error.message(),
-                             root.string());
-        }
-    }
-
-    std::sort(node_names.begin(), node_names.end());
-    node_names.erase(std::unique(node_names.begin(), node_names.end()), node_names.end());
-
-    std::vector<std::pair<std::string, nlohmann::json>> result;
-    result.reserve(node_names.size());
-    for (const auto& node : node_names) {
-        auto metadata = ReadNodeMetadata(node);
-        if (!metadata) {
-            return metadata.error();
-        }
-        result.emplace_back(node, std::move(metadata.value()));
-    }
-
-    if (metadata_cache) {
-        std::scoped_lock const lock(metadata_cache->mutex);
-        if (!metadata_cache->listed_metadata.has_value()) {
-            metadata_cache->listed_metadata = std::move(result);
-        }
-        return *metadata_cache->listed_metadata;
-    }
-    return result;
+        return result;
+    });
 }
 
-Result<std::vector<double>> Store::ReadDoubleArray1D(std::string_view node) const {
-    if (!coordinate_cache) {
-        return ReadDoubleArray1DUncached(node);
-    }
-    std::scoped_lock const lock(coordinate_cache->mutex);
-    const auto found = coordinate_cache->double_arrays.find(std::string(node));
-    if (found != coordinate_cache->double_arrays.end()) {
-        return *found->second;
-    }
-    auto result = std::make_shared<Result<std::vector<double>>>(ReadDoubleArray1DUncached(node));
-    coordinate_cache->double_arrays.emplace(std::string(node), result);
-    return *result;
+Result<std::vector<double>> Store::ReadNumericArray(std::string_view node) const {
+    return _caches->double_arrays.GetOrCompute(std::string(node), [&] { return ReadNumericArrayUncached(node); });
 }
 
-Result<std::vector<double>> Store::ReadDoubleArray1DUncached(std::string_view node) const {
+Result<std::vector<double>> Store::ReadNumericArrayUncached(std::string_view node) const {
+    auto array_path = _transport->ArrayPath(node);
+    if (!array_path) {
+        return array_path.error();
+    }
     try {
         const std::filesystem::path target_path =
-            std::filesystem::weakly_canonical(std::filesystem::absolute(ResolveArrayPath(root, node)));
-        auto spec_result = tensorstore::Spec::FromJson({
-            {"driver", "zarr3"},
-            {"kvstore", {{"driver", "file"}, {"path", target_path.string()}}},
-        });
-        if (!spec_result.ok()) {
-            return MakeError(ErrorCode::io_error,
-                             "Failed to create TensorStore spec: " + spec_result.status().ToString(),
-                             std::string(node));
-        }
-
-        auto open_result =
-            tensorstore::Open(spec_result.value(), context ? context->context : tensorstore::Context::Default(),
-                              tensorstore::OpenMode::open, tensorstore::ReadWriteMode::read)
-                .result();
-        if (!open_result.ok()) {
-            return MakeError(ErrorCode::io_error, "Failed to open TensorStore: " + open_result.status().ToString(),
-                             std::string(node));
-        }
-
-        auto typed_store_result = tensorstore::StaticCast<tensorstore::TensorStore<double>>(open_result.value());
-        if (!typed_store_result.ok()) {
-            return MakeError(ErrorCode::unsupported_data_type, "Array is not readable as double", std::string(node));
-        }
-
-        auto read_result = tensorstore::Read(typed_store_result.value()).result();
-        if (!read_result.ok()) {
-            return MakeError(ErrorCode::io_error, "TensorStore read failed: " + read_result.status().ToString(),
-                             std::string(node));
-        }
-
-        const auto& array = read_result.value();
-        std::vector<double> result;
-        result.reserve(array.num_elements());
-        tensorstore::IterateOverArrays([&result](const double* val) { result.push_back(*val); }, tensorstore::c_order,
-                                       array);
-        return result;
+            std::filesystem::weakly_canonical(std::filesystem::absolute(array_path.value()));
+        return zarr_metadata::ReadNumericValues(target_path, _context, node);
     } catch (const std::exception& e) {
         return MakeError(ErrorCode::io_error, e.what(), std::string(node));
     }
 }
 
 Result<std::vector<std::string>> Store::ReadStringArray1D(std::string_view node) const {
-    if (!coordinate_cache) {
-        return ReadStringArray1DUncached(node);
-    }
-    std::scoped_lock const lock(coordinate_cache->mutex);
-    const auto found = coordinate_cache->string_arrays.find(std::string(node));
-    if (found != coordinate_cache->string_arrays.end()) {
-        return *found->second;
-    }
-    auto result = std::make_shared<Result<std::vector<std::string>>>(ReadStringArray1DUncached(node));
-    coordinate_cache->string_arrays.emplace(std::string(node), result);
-    return *result;
+    return _caches->string_arrays.GetOrCompute(std::string(node), [&] { return ReadStringArray1DUncached(node); });
 }
 
 Result<std::vector<std::string>> Store::ReadStringArray1DUncached(std::string_view node) const {
@@ -435,9 +284,13 @@ Result<std::vector<std::string>> Store::ReadStringArray1DUncached(std::string_vi
     if (!array_meta_res) {
         return array_meta_res.error();
     }
+    auto array_path = _transport->ArrayPath(node);
+    if (!array_path) {
+        return array_path.error();
+    }
     try {
-        return zarr_metadata::ReadFixedLengthUtf32StringArray(ResolveArrayPath(root, node), array_meta_res.value(),
-                                                              metadata, node);
+        return zarr_metadata::ReadFixedLengthUtf32StringArray(array_path.value(), array_meta_res.value(), metadata,
+                                                              node);
     } catch (const std::exception& e) {
         return MakeError(ErrorCode::invalid_argument, e.what(), std::string(node));
     }

@@ -7,7 +7,7 @@
 #ifndef CARTA_ZARR_SRC_SCHEMA_XRADIO_SKY_H_
 #define CARTA_ZARR_SRC_SCHEMA_XRADIO_SKY_H_
 
-#include "../registry.h"
+#include "../profile.h"
 
 namespace carta::zarr::internal::xradio {
 

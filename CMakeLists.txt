@@ -46,12 +46,16 @@ endif()
 
 add_library(carta_zarr SHARED
     src/carta_zarr.cc
-    src/schema/registry.cc
-    src/schema/xradio/common.cc
+    src/schema/profile.cc
+    src/schema/xradio/probe_report.cc
+    src/schema/xradio/linear_axis.cc
     src/schema/xradio/sky.cc
     src/zarr/array_metadata.cc
+    src/zarr/array_view.cc
     src/zarr/store_context.cc
     src/zarr/string_array.cc
+    src/zarr/transport.cc
+    src/zarr/value_reader.cc
     src/store.cc)
 add_library(CARTA::zarr ALIAS carta_zarr)
 
@@ -141,6 +145,70 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
     target_compile_definitions(carta_zarr_string_tests PRIVATE
         CARTA_ZARR_STRING_FIXTURE_DIR="${CARTA_ZARR_FIXTURE_DIR}/string")
     add_test(NAME carta-zarr-string-array COMMAND carta_zarr_string_tests)
+
+    # The schema profile's structural decisions read metadata only, so they run against an in-memory
+    # transport instead of a directory tree. This target compiles the internals directly and links no
+    # TensorStore: the value reader is stubbed, which is also the honest behaviour of a transport
+    # holding no array data. See docs/adr/0004-store-seam-at-the-transport.md.
+    add_executable(carta_zarr_profile_tests
+        tests/schema_profile_test.cc
+        tests/support/value_reader_stub.cc
+        src/store.cc
+        src/schema/profile.cc
+        src/schema/xradio/probe_report.cc
+        src/schema/xradio/linear_axis.cc
+        src/schema/xradio/sky.cc
+        src/zarr/array_metadata.cc
+        src/zarr/array_view.cc
+        src/zarr/string_array.cc
+        src/zarr/transport.cc)
+    target_compile_features(carta_zarr_profile_tests PRIVATE cxx_std_17)
+    target_include_directories(carta_zarr_profile_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(carta_zarr_profile_tests PRIVATE
+        nlohmann_json::nlohmann_json
+        ZLIB::ZLIB
+        Zstd::Zstd
+        Blosc::blosc)
+    add_test(NAME carta-zarr-schema-profile COMMAND carta_zarr_profile_tests)
+
+    # ArrayView addresses a flat Zarr buffer by dimension name. It needs only its own metadata type,
+    # so it is tested directly rather than through a store.
+    add_executable(carta_zarr_array_view_tests
+        tests/array_view_test.cc
+        src/zarr/array_view.cc
+        src/zarr/array_metadata.cc)
+    target_compile_features(carta_zarr_array_view_tests PRIVATE cxx_std_17)
+    target_include_directories(carta_zarr_array_view_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(carta_zarr_array_view_tests PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME carta-zarr-array-view COMMAND carta_zarr_array_view_tests)
+
+    # Memo is a header-only utility, so this target compiles only the test. It pins the two
+    # decisions Store leans on: a value is computed exactly once, and a failure is remembered.
+    add_executable(carta_zarr_memo_tests tests/memo_test.cc)
+    target_compile_features(carta_zarr_memo_tests PRIVATE cxx_std_17)
+    target_include_directories(carta_zarr_memo_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    find_package(Threads REQUIRED)
+    target_link_libraries(carta_zarr_memo_tests PRIVATE Threads::Threads)
+    add_test(NAME carta-zarr-memo COMMAND carta_zarr_memo_tests)
+
+    # The linear axis fit is pure: values in, a linear description out. It is tested on its own,
+    # with no store and no transport, so the cases that are awkward to build as a directory tree --
+    # unevenly spaced samples, an extrapolated reference pixel, degenerate axes -- are cheap here.
+    add_executable(carta_zarr_linear_axis_tests
+        tests/linear_axis_test.cc
+        src/schema/xradio/linear_axis.cc)
+    target_compile_features(carta_zarr_linear_axis_tests PRIVATE cxx_std_17)
+    target_include_directories(carta_zarr_linear_axis_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME carta-zarr-linear-axis COMMAND carta_zarr_linear_axis_tests)
 
     # Conformance runs against a store XRADIO itself produced, so that a bump of the pinned XRADIO
     # version reports which of this library's assumptions it broke.
