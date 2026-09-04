@@ -31,7 +31,7 @@ bool IsFlag(const zarr_metadata::ArrayMetadata& metadata) {
 int KnownImageRank(std::string_view image_id) {
     static constexpr std::array<std::string_view, 6> known{
         "SKY", "MODEL", "RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM", "MASK_DECONVOLVE"};
-    const auto found = std::find(known.begin(), known.end(), image_id);
+    const auto *const found = std::find(known.begin(), known.end(), image_id);
     return found == known.end() ? static_cast<int>(known.size()) : static_cast<int>(found - known.begin());
 }
 
@@ -468,21 +468,21 @@ Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_i
                 dir.transformation_matrix[1][1] = pc[1][1].get<double>();
             }
         }
-        const auto set_direction_axis = [&](const std::vector<double>& values, std::size_t axis,
-                                            std::string_view name) {
+        const auto set_direction_axis = [&](const std::vector<double>& values, double& increment,
+                                            double& reference_pixel, std::string_view name) {
             if (values.size() < 2) {
                 return;
             }
-            const double increment = values[1] - values[0];
-            dir.increment[axis] = increment * kRadToDeg;
-            if (increment == 0.0) {
+            const double delta = values[1] - values[0];
+            increment = delta * kRadToDeg;
+            if (delta == 0.0) {
                 return;
             }
             const std::size_t closest = ClosestIndex(values, 0.0);
             if (std::abs(values[closest]) <= CoordinateTolerance(values)) {
-                dir.reference_pixel[axis] = static_cast<double>(closest + 1);
+                reference_pixel = static_cast<double>(closest + 1);
             } else {
-                dir.reference_pixel[axis] = (-values.front() / increment) + 1.0;
+                reference_pixel = (-values.front() / delta) + 1.0;
                 AddImageDiagnostic(descriptor, "inexact_reference_pixel",
                                    "The " + std::string(name) +
                                        " coordinate has no sample at its reference world "
@@ -490,26 +490,26 @@ Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_i
                                    std::string(name));
             }
         };
-        set_direction_axis(l_values, 0, "l");
-        set_direction_axis(m_values, 1, "m");
+        set_direction_axis(l_values, dir.increment[0], dir.reference_pixel[0], "l");
+        set_direction_axis(m_values, dir.increment[1], dir.reference_pixel[1], "m");
         descriptor.direction = std::move(dir);
     } else if (!l_values.empty() && !m_values.empty()) {
         DirectionCoordinate dir;
-        const auto set_direction_axis = [&](const std::vector<double>& values, std::size_t axis,
-                                            std::string_view name) {
+        const auto set_direction_axis = [&](const std::vector<double>& values, double& increment,
+                                            double& reference_pixel, std::string_view name) {
             if (values.size() < 2) {
                 return;
             }
-            const double increment = values[1] - values[0];
-            dir.increment[axis] = increment * kRadToDeg;
-            if (increment == 0.0) {
+            const double delta = values[1] - values[0];
+            increment = delta * kRadToDeg;
+            if (delta == 0.0) {
                 return;
             }
             const std::size_t closest = ClosestIndex(values, 0.0);
             if (std::abs(values[closest]) <= CoordinateTolerance(values)) {
-                dir.reference_pixel[axis] = static_cast<double>(closest + 1);
+                reference_pixel = static_cast<double>(closest + 1);
             } else {
-                dir.reference_pixel[axis] = (-values.front() / increment) + 1.0;
+                reference_pixel = (-values.front() / delta) + 1.0;
                 AddImageDiagnostic(descriptor, "inexact_reference_pixel",
                                    "The " + std::string(name) +
                                        " coordinate has no sample at its reference world "
@@ -517,8 +517,8 @@ Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_i
                                    std::string(name));
             }
         };
-        set_direction_axis(l_values, 0, "l");
-        set_direction_axis(m_values, 1, "m");
+        set_direction_axis(l_values, dir.increment[0], dir.reference_pixel[0], "l");
+        set_direction_axis(m_values, dir.increment[1], dir.reference_pixel[1], "m");
         descriptor.direction = std::move(dir);
     }
 
@@ -565,7 +565,7 @@ Result<ImageDescriptor> DescribeSky(const Store& store, std::string_view image_i
                 CoordinateTolerance(spectral.channel_frequencies)) {
                 spectral.reference_pixel = static_cast<double>(closest + 1);
             } else {
-                spectral.reference_pixel = (reference_value - spectral.channel_frequencies.front()) / increment + 1.0;
+                spectral.reference_pixel = ((reference_value - spectral.channel_frequencies.front()) / increment) + 1.0;
                 AddImageDiagnostic(descriptor, "inexact_reference_pixel",
                                    "The frequency coordinate has no sample at its reference world value; CRPIX was "
                                    "linearly extrapolated",

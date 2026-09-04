@@ -294,7 +294,7 @@ Result<std::vector<double>> Store::ReadDoubleArray1D(std::string_view node) cons
     if (!coordinate_cache) {
         return ReadDoubleArray1DUncached(node);
     }
-    std::lock_guard lock(coordinate_cache->mutex);
+    std::scoped_lock const lock(coordinate_cache->mutex);
     const auto found = coordinate_cache->double_arrays.find(std::string(node));
     if (found != coordinate_cache->double_arrays.end()) {
         return *found->second;
@@ -353,7 +353,7 @@ Result<std::vector<std::string>> Store::ReadStringArray1D(std::string_view node)
     if (!coordinate_cache) {
         return ReadStringArray1DUncached(node);
     }
-    std::lock_guard lock(coordinate_cache->mutex);
+    std::scoped_lock const lock(coordinate_cache->mutex);
     const auto found = coordinate_cache->string_arrays.find(std::string(node));
     if (found != coordinate_cache->string_arrays.end()) {
         return *found->second;

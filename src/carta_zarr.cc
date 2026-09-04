@@ -164,7 +164,7 @@ Result<Image> Dataset::OpenImage(std::string_view image_id) const {
     if (!_impl) {
         return MakeError(ErrorCode::invalid_argument, "Dataset handle is empty");
     }
-    std::lock_guard lock(_impl->mutex);
+    std::scoped_lock const lock(_impl->mutex);
     const auto cached = _impl->image_descriptors.find(std::string(image_id));
     if (cached != _impl->image_descriptors.end()) {
         return Image{std::make_shared<Image::Impl>(_impl->context, _impl->location, _impl->descriptor.schema_id,

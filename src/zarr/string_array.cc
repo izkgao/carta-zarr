@@ -17,6 +17,7 @@
 #include <utility>
 
 #include <blosc.h>
+#define ZLIB_CONST
 #include <zlib.h>
 #include <zstd.h>
 
@@ -112,7 +113,7 @@ enum class BytesCodec {
 std::size_t ZstdDecompress(const std::vector<std::uint8_t>& compressed, std::vector<std::uint8_t>& decompressed) {
     const std::size_t decompressed_size =
         ZSTD_decompress(decompressed.data(), decompressed.size(), compressed.data(), compressed.size());
-    if (ZSTD_isError(decompressed_size)) {
+    if (ZSTD_isError(decompressed_size) != 0U) {
         Fail(ErrorCode::decode_error,
              std::string("Zstd decompression failed: ") + ZSTD_getErrorName(decompressed_size));
     }
@@ -128,7 +129,7 @@ std::size_t GzipDecompress(const std::vector<std::uint8_t>& compressed, std::vec
     }
 
     z_stream stream{};
-    stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(compressed.data()));
+    stream.next_in = reinterpret_cast<const Bytef*>(compressed.data());
     stream.avail_in = static_cast<uInt>(compressed.size());
 
     constexpr int gzip_window_bits = 16 + MAX_WBITS;
@@ -205,14 +206,14 @@ std::uint32_t Crc32c(const std::uint8_t* data, std::size_t size) {
             for (int bit = 0; bit < 8; ++bit) {
                 crc = (crc & 1) ? ((crc >> 1) ^ reversed_polynomial) : (crc >> 1);
             }
-            entries[index] = crc;
+            entries.at(index) = crc;
         }
         return entries;
     }();
 
     std::uint32_t crc = 0xFFFFFFFFU;
     for (std::size_t i = 0; i < size; ++i) {
-        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+        crc = table.at((crc ^ data[i]) & 0xFFU) ^ (crc >> 8);
     }
     return crc ^ 0xFFFFFFFFU;
 }

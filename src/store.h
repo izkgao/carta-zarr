@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 namespace carta::zarr::internal {
 
@@ -30,6 +31,9 @@ class StoreContext;
 using StoreContextPtr = std::shared_ptr<const StoreContext>;
 
 struct Store {
+    Store(std::filesystem::path root, nlohmann::json root_metadata, StoreContextPtr context)
+        : root(std::move(root)), root_metadata(std::move(root_metadata)), context(std::move(context)) {}
+
     std::filesystem::path root;
     nlohmann::json root_metadata;
     StoreContextPtr context;

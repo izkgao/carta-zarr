@@ -32,7 +32,7 @@ Result<StoreContextPtr> MakeStoreContext(const OpenOptions& options) {
     auto context = tensorstore::Context::FromJson(std::move(spec));
     if (!context.ok()) {
         return Error{ErrorCode::invalid_argument,
-                     "Unable to apply the requested resource limits: " + context.status().ToString()};
+                     "Unable to apply the requested resource limits: " + context.status().ToString(), {}};
     }
     return std::make_shared<const StoreContext>(std::move(context.value()));
 }
