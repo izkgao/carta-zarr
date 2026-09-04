@@ -63,6 +63,7 @@ struct OpenOptions {
     std::size_t cache_bytes = 0;
     unsigned int io_threads = 0;
     unsigned int decode_threads = 0;
+    bool disable_cache = false;
 };
 
 enum class AxisRole {

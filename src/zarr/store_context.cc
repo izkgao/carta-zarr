@@ -17,6 +17,8 @@ Result<StoreContextPtr> MakeStoreContext(const OpenOptions& options) {
     nlohmann::json spec = nlohmann::json::object();
     if (options.cache_bytes > 0) {
         spec["cache_pool"] = {{"total_bytes_limit", options.cache_bytes}};
+    } else if (options.disable_cache) {
+        spec["cache_pool"] = {{"total_bytes_limit", 0}};
     }
     if (options.io_threads > 0) {
         spec["file_io_concurrency"] = {{"limit", options.io_threads}};

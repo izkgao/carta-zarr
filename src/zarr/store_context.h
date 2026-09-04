@@ -23,8 +23,9 @@ public:
     tensorstore::Context context;
 };
 
-// Translate the public options into TensorStore context resources. Options left at zero keep
-// TensorStore's own defaults instead of being written into the spec.
+// Translate the public options into TensorStore context resources. Positive limits are written
+// into the spec; zero limits keep TensorStore's defaults unless disable_cache explicitly requests
+// a zero-byte cache pool.
 Result<StoreContextPtr> MakeStoreContext(const OpenOptions& options);
 
 }  // namespace carta::zarr::internal
