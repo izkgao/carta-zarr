@@ -28,6 +28,11 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
     return Error{code, std::move(message), std::move(node_path)};
 }
 
+std::string Upper(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return value;
+}
+
 constexpr std::string_view kVersion = "1.2";
 constexpr std::array<std::string_view, 5> kSkyAxes{"time", "frequency", "polarization", "l", "m"};
 constexpr double kRadToDeg = 180.0 / M_PI;
@@ -167,7 +172,7 @@ std::optional<DirectionCoordinate> DescribeDirection(const nlohmann::json& root_
         const auto& cs_info = *coordinate_system;
         if (const auto* projection = ObjectMember(cs_info, "projection");
             projection != nullptr && projection->is_string()) {
-            direction.projection = projection->get<std::string>();
+            direction.projection = Upper(projection->get<std::string>());
         }
         if (const auto* reference_direction = ObjectMember(cs_info, "reference_direction");
             reference_direction != nullptr && reference_direction->is_object()) {
@@ -178,7 +183,7 @@ std::optional<DirectionCoordinate> DescribeDirection(const nlohmann::json& root_
             }
             if (const auto* attributes = ObjectMember(*reference_direction, "attrs");
                 attributes != nullptr && attributes->is_object()) {
-                direction.reference_frame = AttributeString(*attributes, "frame");
+                direction.reference_frame = Upper(AttributeString(*attributes, "frame"));
                 if (const auto* equinox = ObjectMember(*attributes, "equinox"); equinox != nullptr) {
                     if (equinox->is_number()) {
                         direction.equinox = equinox->get<double>();
@@ -266,7 +271,7 @@ std::optional<SpectralCoordinate> DescribeSpectralCoordinate(const Store& store,
             if (spectral.unit.empty()) {
                 spectral.unit = AttributeString(*attributes, "units");
             }
-            spectral.system = AttributeString(*attributes, "observer");
+            spectral.system = Upper(AttributeString(*attributes, "observer"));
         }
     }
 
@@ -316,8 +321,8 @@ std::optional<TemporalCoordinate> DescribeTemporalCoordinate(const Store& store,
         if (const auto* attributes = ObjectMember(metadata.value(), "attributes");
             attributes != nullptr && attributes->is_object()) {
             temporal.unit = AttributeString(*attributes, "units");
-            temporal.scale = AttributeString(*attributes, "scale");
-            temporal.format = AttributeString(*attributes, "format");
+            temporal.scale = Upper(AttributeString(*attributes, "scale"));
+            temporal.format = Upper(AttributeString(*attributes, "format"));
         }
     }
     return temporal;
@@ -361,7 +366,7 @@ ObservationInfo DescribeObservation(const zarr_metadata::ArrayMetadata& image) {
     if (const auto* obsdate = ObjectMember(image.attributes, "obsdate"); obsdate != nullptr && obsdate->is_object()) {
         if (const auto* attributes = ObjectMember(*obsdate, "attrs");
             attributes != nullptr && attributes->is_object()) {
-            observation.timesys = AttributeString(*attributes, "scale");
+            observation.timesys = Upper(AttributeString(*attributes, "scale"));
         }
         if (const auto* data = ObjectMember(*obsdate, "data"); data != nullptr) {
             if (data->is_string()) {
@@ -413,8 +418,7 @@ struct BeamParameterIndices {
 BeamParameterIndices FindBeamParameterIndices(const std::vector<std::string>& labels) {
     BeamParameterIndices indices;
     for (std::size_t index = 0; index < labels.size(); ++index) {
-        std::string label = labels[index];
-        std::transform(label.begin(), label.end(), label.begin(), [](unsigned char c) { return std::toupper(c); });
+        const std::string label = Upper(labels[index]);
         if (label == "MAJOR") {
             indices.major = index;
         } else if (label == "MINOR") {

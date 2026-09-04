@@ -275,7 +275,7 @@ void TestReferenceFixture() {
     Require(!desc.polarization->labels.empty(), "Polarization labels empty in reference fixture");
     Require(desc.temporal.has_value(), "TemporalCoordinate missing in reference fixture");
     Require(desc.temporal->values == std::vector<double>{1.6e9} && desc.temporal->unit == "s" &&
-                desc.temporal->scale == "utc" && desc.temporal->format == "unix",
+                desc.temporal->scale == "UTC" && desc.temporal->format == "UNIX",
             "time coordinate values or attributes were not preserved");
 
     // The generator writes SKY as unsharded zstd chunks of (1, 1, 1, 2, 5) in stored axis order.

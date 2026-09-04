@@ -82,7 +82,7 @@ void TestDirection(const carta::zarr::ImageDescriptor& sky) {
     const auto& direction = *sky.direction;
     Require(direction.projection == "SIN", "projection did not survive the conversion");
     Require(direction.projection_parameters == std::vector<double>{0.0, 0.0}, "projection parameters were dropped");
-    Require(direction.reference_frame == "fk5", "RADESYS did not survive as the reference frame");
+    Require(direction.reference_frame == "FK5", "RADESYS was not normalized to the canonical reference frame");
     Require(direction.equinox.has_value(), "EQUINOX was dropped");
     RequireClose(*direction.equinox, 2000.0, 1.0e-9, "equinox");
     // LONPOLE 180 and LATPOLE 30 are stored in radians and reported in degrees.
@@ -99,7 +99,7 @@ void TestSpectralAndPolarization(const carta::zarr::ImageDescriptor& sky) {
     RequireClose(spectral.channel_frequencies[0], 1.4e9, 1.0, "first channel frequency");
     RequireClose(spectral.channel_frequencies[1], 1.401e9, 1.0, "second channel frequency");
     Require(spectral.unit == "Hz", "the frequency unit was not taken from reference_frequency's attrs");
-    Require(spectral.system == "lsrk", "SPECSYS did not survive as the spectral system");
+    Require(spectral.system == "LSRK", "SPECSYS was not normalized to the canonical spectral system");
     Require(spectral.rest_frequency.has_value(), "RESTFRQ was dropped");
     RequireClose(*spectral.rest_frequency, 1.420405751e9, 1.0, "rest frequency");
     // These channels are evenly spaced, so the optional linear description must be present.
@@ -120,8 +120,8 @@ void TestTemporalAndStorage(const carta::zarr::ImageDescriptor& sky) {
     Require(sky.temporal->values.size() == 1, "the time coordinate lost its only value");
     RequireClose(sky.temporal->values[0], 59000.5, 1.0e-6, "time value");
     Require(sky.temporal->unit == "d", "the time unit changed");
-    Require(sky.temporal->scale == "utc", "the time scale changed");
-    Require(sky.temporal->format == "mjd", "the time format changed");
+    Require(sky.temporal->scale == "UTC", "the time scale was not normalized");
+    Require(sky.temporal->format == "MJD", "the time format was not normalized");
 
     Require(sky.storage.has_value(), "no storage layout was reported");
     Require(!sky.storage->sharded, "XRADIO's zarr writer started sharding");
