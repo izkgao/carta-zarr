@@ -50,12 +50,9 @@ bool HasDiagnostic(const carta::zarr::SchemaProbeResult& probe, const std::strin
     return HasDiagnostic(probe.diagnostics, code);
 }
 
-std::string RootGroup(bool coordinate_system = true, bool declared = true) {
-    std::string attributes = declared ? R"("type": "image_dataset")" : "";
+std::string RootGroup(bool coordinate_system = true) {
+    std::string attributes;
     if (coordinate_system) {
-        if (!attributes.empty()) {
-            attributes += ",";
-        }
         attributes += R"("coordinate_system_info": {
       "projection": "SIN",
       "reference_direction": {"data": [1.0, 0.5]},
@@ -86,8 +83,8 @@ std::string PolarizationArray(const std::string& data_type = R"({"name": "fixed_
            "\"attributes\":{},\"dimension_names\":[\"polarization\"],\"zarr_format\":3,\"node_type\":\"array\"}";
 }
 
-// A declared image dataset carries a coordinate array for every axis its image uses, time included.
-std::map<std::string, std::string> DeclaredStore() {
+// A complete image dataset carries a coordinate array for every axis its image uses, time included.
+std::map<std::string, std::string> CompleteStore() {
     return {
         {"", RootGroup()},
         {"SKY", SkyArray()},
@@ -99,19 +96,11 @@ std::map<std::string, std::string> DeclaredStore() {
     };
 }
 
-// A store predating the root type marker, found by structural detection instead.
-std::map<std::string, std::string> LegacyStore() {
-    auto nodes = DeclaredStore();
-    nodes[""] = RootGroup(true, false);
-    nodes.erase("time");
-    return nodes;
-}
-
 // A store whose child metadata lives only in the root's consolidated_metadata, with no node of its
-// own. Probing must find SKY there: consulting the node listing alone silently rejects a store that
-// plainly declares itself. See docs/adr/0004-store-seam-at-the-transport.md.
-std::map<std::string, std::string> ConsolidatedOnlyLegacyStore() {
-    auto children = LegacyStore();
+// own. Discovery must find its images there rather than relying on filesystem children. See
+// The profile must use the Store abstraction for both filesystem and consolidated metadata.
+std::map<std::string, std::string> ConsolidatedOnlyStore() {
+    auto children = CompleteStore();
     children.erase("");
 
     std::string metadata;
@@ -150,17 +139,23 @@ carta::zarr::SchemaProbeResult Probe(std::map<std::string, std::string> nodes) {
     return probe.value();
 }
 
-void TestDeclaredAndLegacyMatch() {
-    const auto declared = Probe(DeclaredStore());
-    Require(declared.kind == SchemaMatchKind::match, "a declared image dataset did not match");
-    Require(declared.schema_version == "1.2", "unexpected schema version");
+void TestCompleteStoreMatches() {
+    const auto probe = Probe(CompleteStore());
+    Require(probe.kind == SchemaMatchKind::match, "a complete image dataset did not match");
+    Require(probe.schema_version == "1.2", "unexpected schema version");
+}
 
-    const auto legacy = Probe(LegacyStore());
-    Require(legacy.kind == SchemaMatchKind::match, "a legacy store was not found by structural detection");
+void TestDatasetWithoutSkyMatches() {
+    auto nodes = CompleteStore();
+    nodes.erase("SKY");
+    nodes["RESIDUAL"] = SkyArray();
+    const auto probe = Probe(nodes);
+    Require(probe.kind == SchemaMatchKind::match,
+            "an image dataset with only RESIDUAL was incorrectly rejected");
 }
 
 void TestNonMatch() {
-    auto store = Open({{"", RootGroup(true, false)}, {"OTHER", NumericArray("[2]", R"(["x"])")}});
+    auto store = Open({{"", RootGroup()}, {"OTHER", NumericArray("[2]", R"(["x"])")}});
     Require(static_cast<bool>(store), "a valid non-XRADIO group failed to open");
     const auto probe = carta::zarr::internal::ProbeStore(store.value());
     Require(static_cast<bool>(probe), "ProbeStore reported an error for a valid non-XRADIO group");
@@ -169,23 +164,23 @@ void TestNonMatch() {
 }
 
 void TestMissingCoordinateIsInvalid() {
-    auto nodes = DeclaredStore();
+    auto nodes = CompleteStore();
     nodes.erase("time");
     const auto probe = Probe(nodes);
     Require(probe.kind == SchemaMatchKind::invalid,
-            "a declared dataset missing its time coordinate was not reported as invalid");
+            "an image dataset missing its time coordinate was not reported as invalid");
     Require(HasDiagnostic(probe.diagnostics, "invalid_metadata"), "the missing coordinate produced no diagnostic");
 }
 
 void TestCoordinateShapeMismatchIsInvalid() {
-    auto nodes = DeclaredStore();
+    auto nodes = CompleteStore();
     nodes["frequency"] = NumericArray("[7]", R"(["frequency"])");
     const auto probe = Probe(nodes);
     Require(probe.kind == SchemaMatchKind::invalid, "a coordinate whose length disagrees with the image was accepted");
 }
 
 void TestCoordinateDataTypeIsChecked() {
-    auto nodes = DeclaredStore();
+    auto nodes = CompleteStore();
     // Polarization labels are strings; a numeric polarization coordinate is malformed.
     nodes["polarization"] = PolarizationArray("\"float64\"");
     const auto probe = Probe(nodes);
@@ -194,35 +189,33 @@ void TestCoordinateDataTypeIsChecked() {
             "the polarization data type produced no diagnostic");
 }
 
-void TestLegacyStoreNeedsCoordinateSystem() {
-    auto nodes = LegacyStore();
-    nodes[""] = RootGroup(false, false);
+void TestMalformedCoordinateSystemIsInvalid() {
+    auto nodes = CompleteStore();
+    nodes[""] = R"({"attributes":{"coordinate_system_info":{}},"zarr_format":3,"node_type":"group"})";
     const auto probe = Probe(nodes);
-    Require(probe.kind == SchemaMatchKind::invalid, "a legacy store without coordinate_system_info was accepted");
+    Require(probe.kind == SchemaMatchKind::invalid, "malformed coordinate_system_info was accepted");
 }
 
-// A legacy store whose SKY does not carry the five sky axes is malformed, not merely old. The axis
-// check diagnoses it, and that diagnosis has to stop the probe: without it the probe reaches the
-// structural-match path, clears the diagnostics, and calls the store a match.
-void TestLegacyStoreNeedsTheSkyAxes() {
-    auto missing_axis = LegacyStore();
+// Discovery only recognizes complete image planes. An incomplete SKY-only store is simply a
+// non-match because it offers no complete image plane.
+void TestIncompleteImageIsNotMatch() {
+    auto missing_axis = CompleteStore();
     missing_axis["SKY"] =
         SkyArray("float32", R"({"units":"Jy/beam"})", R"(["time","frequency","polarization","l","x"])");
     const auto renamed = Probe(missing_axis);
-    Require(renamed.kind == SchemaMatchKind::invalid, "a legacy SKY missing a required axis was accepted");
-    Require(HasDiagnostic(renamed, "invalid_metadata"), "the missing axis produced no diagnostic");
+    Require(renamed.kind == SchemaMatchKind::no_match, "an incomplete SKY was treated as an image dataset");
 
-    auto wrong_rank = LegacyStore();
+    auto wrong_rank = CompleteStore();
     wrong_rank["SKY"] =
         NumericArray("[1,3,2,4]", R"(["time","frequency","polarization","l"])", "float32", R"({"units":"Jy/beam"})");
     const auto four = Probe(wrong_rank);
-    Require(four.kind == SchemaMatchKind::invalid, "a legacy SKY with four dimensions was accepted");
+    Require(four.kind == SchemaMatchKind::no_match, "a four-dimensional SKY was treated as an image dataset");
 }
 
 // Discovery reports every variable carrying a whole plane's axes, and says why the ones it cannot
 // open are closed. Flags and the optional (l, m) coordinates are never images at all.
 void TestDiscoveryClassifiesVariables() {
-    auto nodes = DeclaredStore();
+    auto nodes = CompleteStore();
     nodes["MODEL"] = SkyArray();
     nodes["COMPLEX"] = SkyArray("complex64");
     nodes["APERTURE"] = SkyArray("float32", "{}", R"(["time","frequency","polarization","u","v"])");
@@ -248,7 +241,7 @@ void TestDiscoveryClassifiesVariables() {
 
 // The openable gate sits on the profile handle, ahead of any descriptor work.
 void TestOpenableGate() {
-    auto nodes = DeclaredStore();
+    auto nodes = CompleteStore();
     nodes["COMPLEX"] = SkyArray("complex64");
     nodes["MASK_0"] = SkyArray("bool", R"({"type":"flag"})");
 
@@ -268,16 +261,14 @@ void TestOpenableGate() {
     Require(!absent && absent.error().code == ErrorCode::not_found, "an absent variable was not reported as missing");
 }
 
-// Regression for the legacy SKY probe. It used to stat the filesystem directly, which cannot see
-// consolidated metadata, so a store declaring SKY only there was reported as a non-match rather than
-// as the XRADIO image dataset it plainly is. See docs/adr/0004-store-seam-at-the-transport.md.
-void TestConsolidatedMetadataDeclaresSky() {
-    auto nodes = ConsolidatedOnlyLegacyStore();
+// Regression for discovery through consolidated metadata. It used to stat the filesystem directly,
+// which cannot see consolidated metadata.
+void TestConsolidatedMetadataDiscovery() {
+    auto nodes = ConsolidatedOnlyStore();
     Require(nodes.size() == 1, "the consolidated store must carry no node entries of its own");
 
     const auto probe = Probe(nodes);
-    Require(probe.kind == SchemaMatchKind::match,
-            "a store declaring SKY only in consolidated metadata was not matched");
+    Require(probe.kind == SchemaMatchKind::match, "a store using consolidated metadata was not matched");
 
     auto store = Open(nodes);
     Require(static_cast<bool>(store), "the consolidated store failed to open");
@@ -291,7 +282,7 @@ void TestConsolidatedMetadataDeclaresSky() {
 // is therefore diagnosed once, by the first fault reached -- the behaviour a probe had when every
 // check returned early, now stated somewhere rather than emerging from the control flow.
 void TestFirstFaultIsTheOnlyDiagnostic() {
-    auto nodes = LegacyStore();
+    auto nodes = CompleteStore();
     nodes["frequency"] = NumericArray("[7]", R"(["frequency"])");  // wrong length
     nodes["polarization"] = PolarizationArray("\"float64\"");      // wrong data type
 
@@ -319,8 +310,8 @@ void TestStoreRejections() {
     Require(!malformed && malformed.error().code == ErrorCode::invalid_metadata,
             "malformed root metadata was not reported as invalid");
 
-    auto store = Open(DeclaredStore());
-    Require(static_cast<bool>(store), "the declared store failed to open");
+    auto store = Open(CompleteStore());
+    Require(static_cast<bool>(store), "the complete store failed to open");
     const auto unknown = carta::zarr::internal::SchemaProfile::For("future.schema");
     Require(!unknown && unknown.error().code == ErrorCode::unsupported_schema, "an unknown schema id was accepted");
 }
@@ -329,17 +320,18 @@ void TestStoreRejections() {
 
 int main() {
     try {
-        TestDeclaredAndLegacyMatch();
+        TestCompleteStoreMatches();
+        TestDatasetWithoutSkyMatches();
         TestNonMatch();
         TestMissingCoordinateIsInvalid();
         TestCoordinateShapeMismatchIsInvalid();
         TestCoordinateDataTypeIsChecked();
-        TestLegacyStoreNeedsCoordinateSystem();
+        TestMalformedCoordinateSystemIsInvalid();
         TestFirstFaultIsTheOnlyDiagnostic();
-        TestLegacyStoreNeedsTheSkyAxes();
+        TestIncompleteImageIsNotMatch();
         TestDiscoveryClassifiesVariables();
         TestOpenableGate();
-        TestConsolidatedMetadataDeclaresSky();
+        TestConsolidatedMetadataDiscovery();
         TestStoreRejections();
         std::cout << "carta-zarr schema profile tests passed\n";
         return 0;

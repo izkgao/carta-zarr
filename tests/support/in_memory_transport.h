@@ -24,9 +24,9 @@ namespace carta::zarr::testing {
  * coordinate value reads report unsupported_transport: this transport serves probing and discovery,
  * never descriptors.
  *
- * Per ADR-0003, hand-written store metadata is for negative and structural cases only -- missing
- * fields, wrong types, mismatched axes, consolidated metadata that disagrees with the node listing.
- * Positive conformance is settled by generator fixtures on disk, in the schema probe tests.
+ * Hand-written store metadata is for negative and structural cases only -- missing fields, wrong
+ * types, mismatched axes, consolidated metadata that disagrees with the node listing. Positive
+ * conformance is settled by generator fixtures on disk, in the schema probe tests.
  */
 class InMemoryTransport final : public internal::Transport {
 public:

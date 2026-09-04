@@ -17,7 +17,7 @@ namespace carta::zarr::internal::xradio {
 
 // The linear description of a sampled coordinate: the reference pixel, reference value, and
 // increment a consumer needs to build a linear axis. Absent fields mean the samples do not support
-// one, and per ADR-0002 the consumer must build a tabular axis from the values instead.
+// one; the consumer must build a tabular axis from the values instead.
 struct LinearAxisFit {
     std::optional<double> reference_pixel;  // CRPIX, 1-based
     std::optional<double> reference_value;  // CRVAL, in the coordinate's own unit

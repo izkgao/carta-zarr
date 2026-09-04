@@ -149,7 +149,7 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
     # The schema profile's structural decisions read metadata only, so they run against an in-memory
     # transport instead of a directory tree. This target compiles the internals directly and links no
     # TensorStore: the value reader is stubbed, which is also the honest behaviour of a transport
-    # holding no array data. See docs/adr/0004-store-seam-at-the-transport.md.
+    # holding no array data.
     add_executable(carta_zarr_profile_tests
         tests/schema_profile_test.cc
         tests/support/value_reader_stub.cc

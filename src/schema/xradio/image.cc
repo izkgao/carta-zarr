@@ -44,43 +44,13 @@ int KnownImageRank(std::string_view image_id) {
     return found == known.end() ? static_cast<int>(known.size()) : static_cast<int>(found - known.begin());
 }
 
-bool RequireExpectedAxes(ProbeReport& report, const zarr_metadata::ArrayMetadata& metadata, std::string_view node) {
-    if (!report.RequireThat(metadata.dimension_names.size() == kSkyAxes.size(), "invalid_metadata",
-                            std::string(node) + " must have exactly five dimensions", std::string(node))) {
-        return false;
-    }
-    for (const auto axis : kSkyAxes) {
-        if (!report.RequireThat(zarr_metadata::FindDimensionIndex(metadata, axis).has_value(), "invalid_metadata",
-                                std::string(node) + " is missing required axis " + std::string(axis),
-                                std::string(node))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// XRADIO's converters mark an image dataset with a root "type" attribute, but not with a single
-// spelling: create_image_xds_from_store() writes "image_dataset" (and image_xds.py matches on that),
-// while the synthetic-image factory writes "image". Accept both, and treat any other value as
-// undeclared so that a renamed marker falls back to structural detection instead of rejecting a
-// store outright.
-bool DeclaresImageDataset(const nlohmann::json& attributes) {
-    static constexpr std::array<std::string_view, 2> kImageDatasetTypes{"image_dataset", "image"};
-    if (!attributes.is_object() || !attributes.contains("type") || !attributes.at("type").is_string()) {
-        return false;
-    }
-    const auto declared = attributes.at("type").get<std::string>();
-    return std::find(kImageDatasetTypes.begin(), kImageDatasetTypes.end(), declared) != kImageDatasetTypes.end();
-}
-
 bool HasAttribute(const nlohmann::json& attributes, std::string_view name) {
     return attributes.is_object() && attributes.contains(name);
 }
 
-// Every axis a declared image carries must have its coordinate array. Both XRADIO readers write one
-// unconditionally for all five axes, time included (xds_from_casacore.py and xds_from_fits.py both
-// assign coords["time"]), so a missing coordinate means the store is malformed rather than old. The
-// structural path below is the lenient one, for stores predating the root type marker.
+// Every image carries a coordinate array for each axis it uses. Both XRADIO readers write all five
+// unconditionally (xds_from_casacore.py and xds_from_fits.py both assign coords["time"]), so a
+// missing coordinate means the store is malformed.
 void RequirePresentCoordinates(ProbeReport& report, const zarr_metadata::ArrayMetadata& image) {
     for (const auto axis : kSkyAxes) {
         report.RequireCoordinateOf(image, axis,
@@ -323,9 +293,9 @@ std::optional<SpectralCoordinate> DescribeSpectralCoordinate(const Store& store,
         spectral.increment = fit.increment;
         AppendDiagnostics(descriptor, std::move(fit.diagnostics));
     } else {
-        // Unevenly spaced channels get no linear description, so a diagnostic about its
-        // reference pixel would describe a value the consumer never sees. Only the reason why
-        // is worth carrying; per ADR-0002 it is what tells the consumer to build a tabular axis.
+        // Unevenly spaced channels get no linear description, so a diagnostic about its reference
+        // pixel would describe a value the consumer never sees. Only the reason why is worth
+        // carrying; it tells the consumer to build a tabular axis.
         for (auto& diagnostic : fit.diagnostics) {
             if (diagnostic.code == "nonuniform_axis") {
                 descriptor.diagnostics.push_back(std::move(diagnostic));
@@ -514,65 +484,31 @@ Result<::carta::zarr::internal::ImageDiscovery> DiscoverImages(const Store& stor
 }
 
 Result<SchemaProbeResult> ProbeImage(const Store& store) {
-    ProbeReport report(store, "SKY");
+    ProbeReport report(store, "image dataset");
 
     const auto& root_attributes = store.RootAttributes();
-    if (DeclaresImageDataset(root_attributes)) {
-        auto discovery = DiscoverImages(store);
-        if (!discovery) {
-            return discovery.error();
-        }
-        report.SetDiagnostics(discovery.value().diagnostics);
-        if (discovery.value().openable_image_ids.empty()) {
-            // A valid XRADIO file we do not serve stays a non-match; the discovery diagnostics
-            // already say why.
-            return report.Finish(SchemaMatchKind::no_match, std::string(kVersion));
-        }
-
-        // Past this point the store has declared itself an image dataset and offered an image, so
-        // any further failure is malformed metadata rather than a different schema.
-        const auto& first_image = discovery.value().openable_image_ids.front();
-        auto array_result = store.ReadArrayMetadata(first_image);
-        if (report.RequireArrayMetadata(array_result, first_image)) {
-            RequirePresentCoordinates(report, array_result.value());
-            if (report.ok() && HasAttribute(root_attributes, "coordinate_system_info")) {
-                report.RequireCoordinateSystem(root_attributes);
-            }
-        }
-        return report.Finish(report.ok() ? SchemaMatchKind::match : SchemaMatchKind::invalid, std::string(kVersion));
+    auto discovery = DiscoverImages(store);
+    if (!discovery) {
+        return discovery.error();
+    }
+    report.SetDiagnostics(discovery.value().diagnostics);
+    if (discovery.value().openable_image_ids.empty()) {
+        // A valid Zarr store without an image that this profile can open is a non-match. The
+        // discovery diagnostics still explain why variables such as complex or aperture-plane
+        // arrays were not openable.
+        return report.Finish(SchemaMatchKind::no_match, std::string(kVersion));
     }
 
-    // A store with no SKY node is simply not ours, so it stays a non-match. Asking the Store rather
-    // than the filesystem matters: ReadNodeMetadata consults consolidated metadata first, so a store
-    // that declares SKY only there is found instead of being silently rejected.
-    auto sky_metadata_result = store.ReadNodeMetadata("SKY");
-    if (!sky_metadata_result) {
-        if (sky_metadata_result.error().code == ErrorCode::not_found) {
-            return report.Finish(SchemaMatchKind::no_match, std::string(kVersion));
+    // Once discovery found an openable image, validate the metadata needed by the image reader.
+    const auto& first_image = discovery.value().openable_image_ids.front();
+    auto array_result = store.ReadArrayMetadata(first_image);
+    if (report.RequireArrayMetadata(array_result, first_image)) {
+        RequirePresentCoordinates(report, array_result.value());
+        if (report.ok() && HasAttribute(root_attributes, "coordinate_system_info")) {
+            report.RequireCoordinateSystem(root_attributes);
         }
-        return sky_metadata_result.error();
     }
-
-    auto sky_result = store.ReadArrayMetadata("SKY");
-    if (report.RequireArrayMetadata(sky_result, "SKY") && RequireExpectedAxes(report, sky_result.value(), "SKY")) {
-        const auto& sky = sky_result.value();
-        report.RequireThat(zarr_metadata::IsRealDataType(sky.data_type), "unsupported_data_type",
-                           "SKY must use a real numeric data type", "SKY");
-        report.RequireCoordinateSystem(store.RootAttributes());
-        // Legacy XRADIO stores identify time by SKY's dimension metadata and do not necessarily
-        // contain a separate time coordinate array. The other four are separate arrays.
-        report.RequireCoordinateOf(sky, "frequency", CoordinateKind::numeric);
-        report.RequireCoordinateOf(sky, "polarization", CoordinateKind::labels);
-        report.RequireCoordinateOf(sky, "l", CoordinateKind::numeric);
-        report.RequireCoordinateOf(sky, "m", CoordinateKind::numeric);
-    }
-
-    if (!report.ok()) {
-        return report.Finish(SchemaMatchKind::invalid, std::string(kVersion));
-    }
-    // A structural match carries no diagnostics: nothing was wrong, it was simply an older store.
-    report.ClearDiagnostics();
-    return report.Finish(SchemaMatchKind::match, std::string(kVersion));
+    return report.Finish(report.ok() ? SchemaMatchKind::match : SchemaMatchKind::invalid, std::string(kVersion));
 }
 
 Result<ImageDescriptor> DescribeImage(const Store& store, std::string_view image_id) {

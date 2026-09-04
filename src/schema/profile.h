@@ -41,8 +41,7 @@ public:
     Result<SchemaProbeResult> Probe(const Store& store) const;
     Result<ImageDiscovery> Discover(const Store& store) const;
 
-    // Both of these first ask whether the profile will open this image at all; ADR-0001 decides what
-    // counts as one.
+    // Both of these first ask whether the profile will open this image at all.
     Result<ImageDescriptor> Describe(const Store& store, std::string_view image_id) const;
     Result<std::vector<Beam>> ReadBeams(const Store& store, std::string_view image_id) const;
 

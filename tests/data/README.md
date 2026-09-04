@@ -20,8 +20,8 @@ separator chunk key encodings.
 probe and descriptor tests. It carries shared coordinate, Stokes, storage, beam, mask, and
 consolidated-metadata examples. Its spectrum is intentionally nonuniform. `SKY` itself has no
 chunk files because all of its values equal the fill value, so pixel-read tests will need a fixture
-with non-fill data. `images/zarr/xradio/legacy` retains the pre-root-`type` structural shape for the
-legacy detection fallback.
+with non-fill data. `images/zarr/xradio/legacy` retains an earlier XRADIO layout to verify image
+discovery and validation across the compatibility baseline.
 
 These fixtures were moved from `carta-backend` (`test/data/`) and must keep the same layouts so the
 extracted library preserves the backend's compatibility baseline. zarr-python emits its expected
@@ -47,4 +47,4 @@ unitless Stokes axis), and the header must carry `LONPOLE`, `LATPOLE`, the `PC` 
 dependency changed.
 
 Cases XRADIO cannot or will not produce — malformed metadata, an ambiguous flag, sharded storage,
-corrupted string chunks, a store predating the root `type` marker — stay in the synthetic fixtures.
+and corrupted string chunks — stay in the synthetic fixtures.

@@ -64,22 +64,6 @@ bool HasDiagnostic(const std::vector<carta::zarr::Diagnostic>& diagnostics, cons
                        [&](const auto& diagnostic) { return diagnostic.code == code; });
 }
 
-std::string TypedRootMetadata() {
-    return R"({
-  "attributes": {
-    "type": "image_dataset",
-    "coordinate_system_info": {
-      "projection": "SIN",
-      "reference_direction": {"data": [1.0, 0.5]},
-      "native_pole_direction": {"data": [0.0, 1.5707963267948966]},
-      "pixel_coordinate_transformation_matrix": [[1.0, 0.0], [0.0, 1.0]]
-    }
-  },
-  "zarr_format": 3,
-  "node_type": "group"
-})";
-}
-
 std::string RootMetadata(bool coordinate_system = true) {
     return coordinate_system ? R"({
   "attributes": {
@@ -137,6 +121,7 @@ void CreateValidStore(const std::filesystem::path& root, std::uint64_t time_leng
                       bool arbitrary_storage_order = false) {
     Write(root / "zarr.json", RootMetadata(coordinate_system));
     Write(root / "SKY" / "zarr.json", SkyArray(time_length, arbitrary_storage_order));
+    Write(root / "time" / "zarr.json", NumericArray("[" + std::to_string(time_length) + "]", "[\"time\"]"));
     Write(root / "frequency" / "zarr.json", NumericArray("[3]", "[\"frequency\"]"));
     Write(root / "l" / "zarr.json", NumericArray("[4]", "[\"l\"]"));
     Write(root / "m" / "zarr.json", NumericArray("[5]", "[\"m\"]"));
@@ -197,7 +182,8 @@ void TestNonMatchAndInvalid(const std::filesystem::path& root) {
     Require(carta::zarr::Probe(root.string()).kind == ProbeKind::zarr_without_supported_schema,
             "Probe did not report a valid unsupported schema");
 
-    CreateValidStore(root, 1, false);
+    CreateValidStore(root);
+    std::filesystem::remove(root / "time" / "zarr.json");
     const auto invalid = carta::zarr::IsXradioImage(root.string());
     Require(!invalid && invalid.error().code == ErrorCode::invalid_metadata,
             "metadata-incomplete XRADIO-like store did not report invalid metadata");
@@ -272,8 +258,8 @@ void TestReferenceFixture() {
     Require(!desc.spectral->reference_pixel.has_value() && !desc.spectral->reference_value.has_value() &&
                 !desc.spectral->increment.has_value(),
             "nonuniform spectral coordinates incorrectly exposed a linear description");
-    // Withholding the linear description is not enough on its own: per ADR-0002 the consumer has to
-    // know it must build a tabular axis, so the reason is reported rather than left silent.
+    // Withholding the linear description is not enough on its own: the consumer has to know it must
+    // build a tabular axis, so the reason is reported rather than left silent.
     Require(HasDiagnostic(desc.diagnostics, "nonuniform_axis"),
             "nonuniform spectral coordinates did not report why they carry no linear description");
     Require(desc.polarization.has_value(), "PolarizationCoordinate missing in reference fixture");
@@ -316,11 +302,11 @@ void TestReferenceFixture() {
     Require(!flag && flag.error().code == ErrorCode::not_found, "flag variable was exposed as an image");
 }
 
-void TestLegacyFixture() {
+void TestCompatibilityFixture() {
     const std::filesystem::path fixture(CARTA_ZARR_LEGACY_FIXTURE);
-    Require(std::filesystem::exists(fixture), "the legacy XRADIO fixture is missing");
+    Require(std::filesystem::exists(fixture), "the compatibility fixture is missing");
     const auto result = carta::zarr::IsXradioImage(fixture.string());
-    Require(result && result.value(), "the no-type legacy fixture did not use structural detection");
+    Require(result && result.value(), "the compatibility fixture did not match");
 }
 
 void TestDiscoveryIgnoresNameAllowlist(const std::filesystem::path& root) {
@@ -479,8 +465,8 @@ void TestBeamTableIndexing(const std::filesystem::path& root) {
 }
 
 // A beam table with more than one time plane used to be read as its first plane only, silently.
-// ADR-0002 has the library report the whole time axis and leave any selection to the consumer, and
-// beams now follow that too. Time varies slowest, so a single-plane table is unaffected.
+// The library reports the whole time axis and leaves any selection to the consumer, and beams now
+// follow that too. Time varies slowest, so a single-plane table is unaffected.
 void TestBeamTableTimePlanes(const std::filesystem::path& root) {
     CreateValidStore(root);
     Write(root / "SKY" / "zarr.json",
@@ -588,10 +574,9 @@ void TestBeamTableWithoutTimeDimension(const std::filesystem::path& root) {
 }
 
 // A sharded array grids its store by shard; the inner chunk shape lives in the sharding codec.
-// A dataset that declares itself but has no SKY is still a valid image dataset. This is the case
-// the declared root marker exists for: structural detection looks for SKY and would reject it.
-void TestTypedDatasetWithoutSky(const std::filesystem::path& root) {
-    Write(root / "zarr.json", TypedRootMetadata());
+// An image dataset without SKY is valid: discovery identifies the dataset from its image variables.
+void TestImageDatasetWithoutSky(const std::filesystem::path& root) {
+    Write(root / "zarr.json", RootMetadata());
     Write(root / "RESIDUAL" / "zarr.json", SkyArray());
     Write(root / "time" / "zarr.json", NumericArray("[1]", R"(["time"])"));
     Write(root / "frequency" / "zarr.json", NumericArray("[3]", R"(["frequency"])"));
@@ -600,7 +585,7 @@ void TestTypedDatasetWithoutSky(const std::filesystem::path& root) {
     Write(root / "m" / "zarr.json", NumericArray("[5]", R"(["m"])"));
 
     const auto matched = carta::zarr::IsXradioImage(root.string());
-    Require(matched && matched.value(), "a declared image dataset without SKY was not recognized");
+    Require(matched && matched.value(), "an image dataset without SKY was not recognized");
 
     const auto context = carta::zarr::Context::Create();
     Require(static_cast<bool>(context), "Context::Create failed for the SKY-less dataset");
@@ -612,11 +597,11 @@ void TestTypedDatasetWithoutSky(const std::filesystem::path& root) {
             "the only image of a SKY-less dataset could not be opened");
 }
 
-// A declared image dataset must carry a coordinate array for every axis its image uses, time
-// included: both XRADIO readers always write one. A missing coordinate is malformed metadata, and
-// must be reported as such rather than as "not this schema".
-void TestDeclaredDatasetMissingTimeCoordinate(const std::filesystem::path& root) {
-    Write(root / "zarr.json", TypedRootMetadata());
+// Every image dataset must carry a coordinate array for every axis its image uses, time included:
+// both XRADIO readers always write one. A missing coordinate is malformed metadata, and must be
+// reported as such rather than as "not this schema".
+void TestImageDatasetMissingTimeCoordinate(const std::filesystem::path& root) {
+    Write(root / "zarr.json", RootMetadata());
     Write(root / "SKY" / "zarr.json", SkyArray());
     Write(root / "frequency" / "zarr.json", NumericArray("[3]", R"(["frequency"])"));
     Write(root / "polarization" / "zarr.json", PolarizationArray());
@@ -625,7 +610,7 @@ void TestDeclaredDatasetMissingTimeCoordinate(const std::filesystem::path& root)
 
     const auto matched = carta::zarr::IsXradioImage(root.string());
     Require(!matched && matched.error().code == ErrorCode::invalid_metadata,
-            "a declared dataset missing its time coordinate was not reported as invalid metadata");
+            "an image dataset missing its time coordinate was not reported as invalid metadata");
     Require(carta::zarr::Probe(root.string()).kind == ProbeKind::invalid_dataset,
             "Probe did not report the missing time coordinate as an invalid dataset");
 }
@@ -639,6 +624,7 @@ void TestShardedStorageLayout(const std::filesystem::path& root) {
           "\"codecs\":[{\"name\":\"bytes\"},{\"name\":\"blosc\"}]}}],"
           "\"dimension_names\":[\"time\",\"frequency\",\"polarization\",\"l\",\"m\"],"
           "\"zarr_format\":3,\"node_type\":\"array\"}");
+    Write(root / "time" / "zarr.json", NumericArray("[1]", R"(["time"])"));
     Write(root / "frequency" / "zarr.json", NumericArray("[3]", R"(["frequency"])"));
     Write(root / "polarization" / "zarr.json", PolarizationArray());
     Write(root / "l" / "zarr.json", NumericArray("[4]", R"(["l"])"));
@@ -675,14 +661,14 @@ int main() {
         TestAmbiguousPixelMask(root / "ambiguous-mask");
         TestDiscoveryIgnoresNameAllowlist(root / "unlisted-image");
         TestMetadataCache(root / "metadata-cache");
-        TestTypedDatasetWithoutSky(root / "typed-no-sky");
-        TestDeclaredDatasetMissingTimeCoordinate(root / "typed-no-time");
+        TestImageDatasetWithoutSky(root / "image-no-sky");
+        TestImageDatasetMissingTimeCoordinate(root / "image-no-time");
         TestShardedStorageLayout(root / "sharded");
         TestBeamTableIndexing(root / "beam-table");
         TestBeamTableTimePlanes(root / "beam-time");
         TestBeamTableWithoutTimeDimension(root / "beam-notime");
         TestReferenceFixture();
-        TestLegacyFixture();
+        TestCompatibilityFixture();
         std::filesystem::remove_all(root);
         std::cout << "carta-zarr schema probe tests passed\n";
         return 0;
