@@ -52,6 +52,7 @@ add_library(carta_zarr SHARED
     src/schema/xradio/image.cc
     src/zarr/array_metadata.cc
     src/zarr/array_view.cc
+    src/zarr/pixel_reader.cc
     src/zarr/store_context.cc
     src/zarr/string_array.cc
     src/zarr/transport.cc
@@ -78,7 +79,9 @@ target_link_libraries(carta_zarr PRIVATE
 target_link_libraries(carta_zarr PRIVATE
     tensorstore::tensorstore
     tensorstore::driver_zarr3
-    tensorstore::kvstore_file)
+    tensorstore::kvstore_file
+    tensorstore::index_space_dim_expression
+    tensorstore::driver_cast)
 
 set_target_properties(carta_zarr PROPERTIES
     OUTPUT_NAME carta-zarr
@@ -153,6 +156,7 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
     add_executable(carta_zarr_profile_tests
         tests/schema_profile_test.cc
         tests/support/value_reader_stub.cc
+        tests/support/pixel_reader_stub.cc
         src/store.cc
         src/schema/profile.cc
         src/schema/xradio/probe_report.cc

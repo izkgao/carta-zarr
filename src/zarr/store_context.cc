@@ -6,12 +6,49 @@
 
 #include "store_context.h"
 
+#include <tensorstore/open.h>
+#include <tensorstore/open_mode.h>
+#include <tensorstore/spec.h>
+
 #include <nlohmann/json.hpp>
 
 #include <memory>
 #include <utility>
 
 namespace carta::zarr::internal {
+
+Result<tensorstore::TensorStore<>> StoreContext::OpenArray(const std::filesystem::path& array_path,
+                                                           std::string_view node) const {
+    const std::string key = array_path.string();
+    {
+        const std::scoped_lock lock(_arrays_mutex);
+        if (const auto found = _arrays.find(key); found != _arrays.end()) {
+            return found->second;
+        }
+    }
+
+    // Opened outside the lock so that a slow open of one array does not stall reads of another.
+    auto spec = tensorstore::Spec::FromJson({
+        {"driver", "zarr3"},
+        {"kvstore", {{"driver", "file"}, {"path", key}}},
+    });
+    if (!spec.ok()) {
+        return Error{ErrorCode::io_error, "Failed to create TensorStore spec: " + spec.status().ToString(),
+                     std::string(node)};
+    }
+    auto opened = tensorstore::Open(spec.value(), context, tensorstore::OpenMode::open,
+                                    tensorstore::ReadWriteMode::read)
+                      .result();
+    if (!opened.ok()) {
+        return Error{ErrorCode::io_error, "Failed to open TensorStore: " + opened.status().ToString(),
+                     std::string(node)};
+    }
+
+    const std::scoped_lock lock(_arrays_mutex);
+    // Another thread may have opened the same array first; either handle is equivalent, so keep
+    // whichever landed in the table.
+    return _arrays.emplace(key, std::move(opened).value()).first->second;
+}
 
 Result<StoreContextPtr> MakeStoreContext(const OpenOptions& options) {
     nlohmann::json spec = nlohmann::json::object();

@@ -15,12 +15,19 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 
 namespace carta::zarr::internal {
+
+// Defined in zarr/pixel_reader.h. Forward declared so that store.h stays free of the reader that
+// pulls in TensorStore, the same way StoreContext is kept opaque below.
+namespace zarr {
+struct PixelSelection;
+}
 
 // Everything a Store remembers for the lifetime of its read-only view.
 //
@@ -73,6 +80,14 @@ public:
     Result<std::vector<double>> ReadNumericArray(std::string_view node) const;
     Result<std::vector<std::string>> ReadStringArray1D(std::string_view node) const;
     Result<StorageLayout> ReadStorageLayout(std::string_view node) const;
+
+    // Pixel reads are deliberately uncached here: a slab is requested once and is far larger than
+    // anything the metadata tables hold. Reuse belongs in TensorStore's chunk cache, which already
+    // works at chunk granularity and is sized by the consumer's Context.
+    Result<void> ReadPixelsFloat32(std::string_view node, const zarr::PixelSelection& selection,
+                                   float* destination, std::size_t destination_elements) const;
+    Result<void> ReadPixelMaskBytes(std::string_view node, const zarr::PixelSelection& selection,
+                                    std::uint8_t* destination, std::size_t destination_elements) const;
 
 private:
     Result<std::vector<double>> ReadNumericArrayUncached(std::string_view node) const;

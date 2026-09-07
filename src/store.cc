@@ -7,6 +7,7 @@
 #include "store.h"
 
 #include "zarr/array_metadata.h"
+#include "zarr/pixel_reader.h"
 #include "zarr/string_array.h"
 #include "zarr/transport.h"
 #include "zarr/value_reader.h"
@@ -370,6 +371,46 @@ Result<std::vector<double>> Store::ReadNumericArrayUncached(std::string_view nod
         const std::filesystem::path target_path =
             std::filesystem::weakly_canonical(std::filesystem::absolute(array_path.value()));
         return zarr_metadata::ReadNumericValues(target_path, _context, node);
+    } catch (const std::exception& e) {
+        return MakeError(ErrorCode::io_error, e.what(), std::string(node));
+    }
+}
+
+namespace {
+
+Result<std::filesystem::path> ResolveArrayPath(const TransportPtr& transport, std::string_view node) {
+    auto array_path = transport->ArrayPath(node);
+    if (!array_path) {
+        return array_path.error();
+    }
+    return std::filesystem::weakly_canonical(std::filesystem::absolute(array_path.value()));
+}
+
+}  // namespace
+
+Result<void> Store::ReadPixelsFloat32(std::string_view node, const zarr::PixelSelection& selection,
+                                      float* destination, std::size_t destination_elements) const {
+    try {
+        auto target_path = ResolveArrayPath(_transport, node);
+        if (!target_path) {
+            return target_path.error();
+        }
+        return zarr_metadata::ReadFloat32(target_path.value(), _context, node, selection, destination,
+                                          destination_elements);
+    } catch (const std::exception& e) {
+        return MakeError(ErrorCode::io_error, e.what(), std::string(node));
+    }
+}
+
+Result<void> Store::ReadPixelMaskBytes(std::string_view node, const zarr::PixelSelection& selection,
+                                       std::uint8_t* destination, std::size_t destination_elements) const {
+    try {
+        auto target_path = ResolveArrayPath(_transport, node);
+        if (!target_path) {
+            return target_path.error();
+        }
+        return zarr_metadata::ReadMaskBytes(target_path.value(), _context, node, selection, destination,
+                                            destination_elements);
     } catch (const std::exception& e) {
         return MakeError(ErrorCode::io_error, e.what(), std::string(node));
     }
