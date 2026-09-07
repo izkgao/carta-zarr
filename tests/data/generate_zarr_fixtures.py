@@ -346,12 +346,138 @@ def generate_xradio_fixture(path: Path, *, typed: bool, consolidated: bool) -> N
         add_consolidated_metadata(path)
 
 
+def generate_pixel_fixture(path: Path) -> None:
+    """An XRADIO image whose pixels are readable and self-describing.
+
+    The other XRADIO fixtures carry only fill values, so they pin metadata and say nothing about a
+    pixel read. Every axis here has a different length, so a read that permutes axes wrongly cannot
+    still produce the right shape, and each value spells its own logical coordinates. One chunk is
+    deleted after writing and the flag marks a known pattern false, which is how the fill-value and
+    pixel-mask paths get a definition instead of an assumption.
+    """
+    time_size, frequency_size, polarization_size, l_size, m_size = 1, 2, 3, 4, 5
+    shape = (time_size, frequency_size, polarization_size, l_size, m_size)
+    chunks = (1, 1, 1, 2, 5)
+
+    root = zarr.open_group(store=path, mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "type": "image_dataset",
+            "data_groups": {"base": {"sky": "SKY"}},
+            "coordinate_system_info": {
+                "projection": "SIN",
+                "reference_direction": {
+                    "data": [1.0, 0.5],
+                    "attrs": {"frame": "fk5", "equinox": "J2000"},
+                },
+                "native_pole_direction": {"data": [0.0, 1.5707963267948966]},
+                "projection_parameters": [0.0, 0.0],
+                "pixel_coordinate_transformation_matrix": [[1.0, 0.0], [0.0, 1.0]],
+            },
+        }
+    )
+
+    # value = t*10000 + f*1000 + p*100 + l*10 + m, so a misplaced element names where it came from.
+    indices = np.indices(shape)
+    values = (
+        indices[0] * 10000 + indices[1] * 1000 + indices[2] * 100 + indices[3] * 10 + indices[4]
+    ).astype(np.float32)
+
+    sky = zarr.create_array(
+        store=path / "SKY",
+        shape=shape,
+        chunks=chunks,
+        dtype=np.float32,
+        zarr_format=3,
+        dimension_names=("time", "frequency", "polarization", "l", "m"),
+        serializer=BytesCodec(endian="little"),
+        compressors=[ZstdCodec(level=1)],
+        fill_value=float("nan"),
+        attributes={
+            "units": "Jy/beam",
+            "type": "sky",
+            "flag": "FLAG",
+            "object_name": "Zarr pixel source",
+            "observer": "CARTA",
+            "obsdate": {"data": 59000.0, "attrs": {"format": "MJD", "scale": "UTC"}},
+            # direction is (longitude, latitude) in radians and distance is a radius in metres.
+            # Both are needed before an observatory position exists at all, and the values are
+            # deliberately off-axis so that a consumer mixing up x, y and z cannot still agree.
+            "telescope": {
+                "name": "Test scope",
+                "direction": {"data": [2.0, -0.5], "attrs": {"units": "rad"}},
+                "distance": {"data": [6371000.0], "attrs": {"units": "m"}},
+            },
+        },
+    )
+    sky[:] = values
+
+    # True means a good pixel. The pattern crosses chunk boundaries so a mask read that ignores the
+    # transpose cannot accidentally agree.
+    flags = ((indices[3] + indices[4]) % 3 != 0)
+    flag = zarr.create_array(
+        store=path / "FLAG",
+        shape=shape,
+        chunks=chunks,
+        dtype=np.bool_,
+        zarr_format=3,
+        dimension_names=("time", "frequency", "polarization", "l", "m"),
+        serializer=BytesCodec(endian="little"),
+        compressors=[ZstdCodec(level=1)],
+        fill_value=False,
+        attributes={"type": "flag"},
+    )
+    flag[:] = flags
+
+    # Drop one written chunk so that a read crossing it has to fall back to the fill value.
+    missing_chunk = path / "SKY" / "c" / "0" / "1" / "2" / "1" / "0"
+    if not missing_chunk.exists():
+        raise RuntimeError(f"expected chunk {missing_chunk} to exist before deleting it")
+    missing_chunk.unlink()
+
+    create_numeric_array(
+        path / "l",
+        np.asarray([-0.002, -0.001, 0.0, 0.001], dtype=np.float64),
+        dimension_names=("l",),
+    )
+    create_numeric_array(
+        path / "m",
+        np.asarray([-0.002, -0.001, 0.0, 0.001, 0.002], dtype=np.float64),
+        dimension_names=("m",),
+    )
+    create_numeric_array(
+        path / "frequency",
+        np.asarray([1.4e9, 1.401e9], dtype=np.float64),
+        dimension_names=("frequency",),
+        attributes={"rest_frequency": {"data": 1.420405751e9}},
+    )
+    create_numeric_array(
+        path / "time",
+        np.asarray([1.6e9], dtype=np.float64),
+        dimension_names=("time",),
+        attributes={"units": "s", "scale": "utc", "format": "unix"},
+    )
+    polarization = create_string_array(
+        path / "polarization",
+        serializer=BytesCodec(endian="little"),
+        shape=(polarization_size,),
+        chunks=(polarization_size,),
+        values=np.asarray(["I", "Q", "U"], dtype="U1"),
+    )
+    polarization.attrs.update({"dimension_names": ["polarization"]})
+
+
 def main() -> None:
-    shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
-    OUTPUT_DIR.mkdir(parents=True)
+    # Remove only what this script owns. xradio/conformance lives under the same directory but is
+    # written by generate_conformance_fixtures.py against a pinned XRADIO, and wiping the whole tree
+    # here would delete a fixture this script cannot rebuild.
+    for owned in ("string", "xradio/minimal", "xradio/legacy", "xradio/pixels"):
+        shutil.rmtree(OUTPUT_DIR / owned, ignore_errors=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     generate_string_fixtures()
     generate_xradio_fixture(OUTPUT_DIR / "xradio" / "minimal", typed=True, consolidated=True)
     generate_xradio_fixture(OUTPUT_DIR / "xradio" / "legacy", typed=False, consolidated=False)
+    generate_pixel_fixture(OUTPUT_DIR / "xradio" / "pixels")
 
 
 if __name__ == "__main__":

@@ -223,6 +223,17 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         CARTA_ZARR_CONFORMANCE_FIXTURE="${CARTA_ZARR_FIXTURE_DIR}/xradio/conformance")
     add_test(NAME carta-zarr-xradio-conformance COMMAND carta_zarr_conformance_tests)
 
+    # Pixel reads run against a fixture whose values encode their own logical coordinates, so the
+    # axis permutation, the stride, the fill value of a deleted chunk and the pixel mask each have a
+    # wrong answer that the test can tell apart from the right one.
+    add_executable(carta_zarr_pixel_read_tests tests/pixel_read_test.cc)
+    target_link_libraries(carta_zarr_pixel_read_tests PRIVATE CARTA::zarr)
+    target_compile_features(carta_zarr_pixel_read_tests PRIVATE cxx_std_17)
+    target_compile_definitions(carta_zarr_pixel_read_tests PRIVATE
+        CARTA_ZARR_PIXEL_FIXTURE="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels")
+    target_link_libraries(carta_zarr_pixel_read_tests PRIVATE Threads::Threads)
+    add_test(NAME carta-zarr-pixel-read COMMAND carta_zarr_pixel_read_tests)
+
     if(CARTA_ZARR_BUILD_PACKAGE_TEST)
         add_test(
             NAME carta-zarr-package-consumer
