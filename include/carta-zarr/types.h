@@ -152,6 +152,24 @@ struct StorageLayout {
     bool sharded = false;
 };
 
+// The read geometry of one image, reported in the logical axis order of ImageDescriptor::axes so
+// that a consumer never has to undo the stored order itself.
+//
+// Two granularities, deliberately separate: an inner chunk is what must be decoded to reach any
+// byte inside it, while a shard is what one I/O request fetches. They are equal when the array is
+// not sharded, and can differ by a large factor when it is, so a consumer sizing a cache reasons
+// about chunk_shape and one predicting request count reasons about shard_shape.
+struct ChunkGeometry {
+    std::vector<std::uint64_t> chunk_shape;
+    std::vector<std::uint64_t> shard_shape;
+    // Number of inner chunks along each axis.
+    std::vector<std::uint64_t> grid_shape;
+    bool sharded = false;
+    // True when the logical order differs from the stored order, so every read carries a transpose.
+    bool transpose_required = false;
+    std::string compressor;
+};
+
 struct Beam {
     // The plane this beam was fitted on. Every plane is reported; a consumer that handles one time
     // step selects it rather than being handed it.
@@ -186,6 +204,9 @@ struct ImageDescriptor {
     std::vector<AxisDescriptor> axes;
     std::string unit;
     bool has_pixel_mask = false;
+    // The flag variable supplying this image's pixel mask, empty when it has none. Reported for the
+    // same reason `id` is: it names a data variable the consumer may want to see in diagnostics.
+    std::string pixel_mask_id;
     std::optional<DirectionCoordinate> direction;
     std::optional<SpectralCoordinate> spectral;
     std::optional<PolarizationCoordinate> polarization;
@@ -204,6 +225,13 @@ struct Range {
 struct ReadRequest {
     std::vector<Range> axes;
     DataType output_type = DataType::float32;
+};
+
+struct ReadOptions {
+    // Write NaN wherever the pixel mask is false, so that one call answers what would otherwise be
+    // a pixel read plus a mask read. On by default: masking during the read costs one pass over
+    // data already in hand, while a caller doing it afterwards pays for a second traversal.
+    bool apply_pixel_mask = true;
 };
 
 struct MutableBufferView {

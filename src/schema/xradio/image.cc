@@ -379,10 +379,11 @@ ObservationInfo DescribeObservation(const zarr_metadata::ArrayMetadata& image) {
     return observation;
 }
 
-Result<bool> DeterminePixelMask(const Store& store, const zarr_metadata::ArrayMetadata& image,
-                                std::string_view image_id, ImageDescriptor& descriptor) {
-    if (!AttributeString(image.attributes, "flag").empty()) {
-        return true;
+// Returns the flag variable supplying this image's pixel mask, or an empty name when it has none.
+Result<std::string> DeterminePixelMask(const Store& store, const zarr_metadata::ArrayMetadata& image,
+                                       std::string_view image_id, ImageDescriptor& descriptor) {
+    if (auto declared = AttributeString(image.attributes, "flag"); !declared.empty()) {
+        return declared;
     }
 
     auto nodes = store.ListNodeMetadata();
@@ -399,14 +400,14 @@ Result<bool> DeterminePixelMask(const Store& store, const zarr_metadata::ArrayMe
         matching_flags.push_back(node);
     }
     if (matching_flags.size() == 1) {
-        return true;
+        return matching_flags.front();
     }
     if (matching_flags.size() > 1) {
         AddImageDiagnostic(descriptor, "ambiguous_pixel_mask",
                            "More than one flag variable matches the image shape; no pixel mask was selected",
                            std::string(image_id));
     }
-    return false;
+    return std::string{};
 }
 
 struct BeamParameterIndices {
@@ -607,7 +608,8 @@ Result<ImageDescriptor> DescribeImage(const Store& store, std::string_view image
     if (!pixel_mask) {
         return pixel_mask.error();
     }
-    descriptor.has_pixel_mask = pixel_mask.value();
+    descriptor.pixel_mask_id = pixel_mask.value();
+    descriptor.has_pixel_mask = !descriptor.pixel_mask_id.empty();
 
     return descriptor;
 }

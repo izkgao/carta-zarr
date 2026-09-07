@@ -45,7 +45,20 @@ public:
     ~Image();
 
     const ImageDescriptor& descriptor() const noexcept;
+
+    // The read geometry, in the same axis order as descriptor().axes.
+    const ChunkGeometry& chunk_geometry() const noexcept;
+
+    // Reads a densely packed result in logical axis order, axis 0 fastest-varying. Returns the
+    // number of elements written. Safe to call concurrently on one handle.
     Result<std::size_t> Read(const ReadRequest& request, MutableBufferView destination) const;
+    Result<std::size_t> Read(const ReadRequest& request, MutableBufferView destination,
+                             const ReadOptions& options) const;
+
+    // Reads this image's pixel mask over the same region, one byte per pixel, true meaning a good
+    // pixel. Reports not_found when the image has no mask.
+    Result<std::size_t> ReadPixelMask(const ReadRequest& request, MutableBufferView destination) const;
+
     Result<std::vector<Beam>> ReadBeams() const;
 
 private:
