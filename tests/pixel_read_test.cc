@@ -334,6 +334,10 @@ void TestProgressiveRead(const carta::zarr::Image& sky) {
     std::vector<float> pixels(total, -1.0f);
     std::vector<std::size_t> reported;
     auto options = Unmasked();
+    // A piece is sized by how much chunk data it decodes, so a small limit is what makes this
+    // fixture -- forty bytes per chunk -- produce more than one. Without it the whole image fits in
+    // a single piece and the split below is never exercised.
+    options.temporary_memory_limit_bytes = 160;
     options.progress = [&](std::size_t written, std::size_t elements_total) {
         Require(elements_total == total, "progress should report the request's own element count");
         Require(written > 0 && written <= total, "progress should report a prefix of the destination");
@@ -356,10 +360,35 @@ void TestProgressiveRead(const carta::zarr::Image& sky) {
         Require(matches, "a progressive read should return what an ordinary one returns");
     }
 
-    // This fixture is one piece wide, so the split itself is exercised on real cubes rather than
-    // here; what this pins down is the contract every caller relies on.
+    Require(reported.size() > 1,
+            "the read should have been split; if kDecodedBytesPerRead or the fixture's chunk shape "
+            "changed, raise temporary_memory_limit_bytes here or this test stops testing the split");
+
+    // The same read with the pixel mask applied, because the mask buffer and the NaN it writes are
+    // per piece too, and a wrong offset there would corrupt every piece but the first.
+    std::vector<float> masked_expected(total);
+    Require(static_cast<bool>(sky.Read(request, {masked_expected.data(), masked_expected.size() * sizeof(float)})),
+            "the masked reference read failed");
+    std::vector<float> masked(total, -1.0f);
+    carta::zarr::ReadOptions masked_options;
+    masked_options.temporary_memory_limit_bytes = 160;
+    std::size_t masked_pieces = 0;
+    masked_options.progress = [&](std::size_t, std::size_t) {
+        ++masked_pieces;
+        return true;
+    };
+    Require(static_cast<bool>(sky.Read(request, {masked.data(), masked.size() * sizeof(float)}, masked_options)),
+            "a progressive masked read failed");
+    Require(masked_pieces > 1, "the masked read should have been split too");
+    for (std::size_t i = 0; i < total; ++i) {
+        const bool matches = masked.at(i) == masked_expected.at(i) ||
+                             (std::isnan(masked.at(i)) && std::isnan(masked_expected.at(i)));
+        Require(matches, "a progressive masked read should return what an ordinary one returns");
+    }
+
     std::vector<float> abandoned(total, -1.0f);
     auto cancelling = Unmasked();
+    cancelling.temporary_memory_limit_bytes = 160;
     std::size_t calls = 0;
     cancelling.progress = [&](std::size_t, std::size_t) {
         ++calls;

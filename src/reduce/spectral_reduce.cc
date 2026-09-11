@@ -22,11 +22,6 @@ namespace {
 
 constexpr double kInfinity = std::numeric_limits<double>::infinity();
 
-// The pixel buffer one slab may occupy when the caller sets no limit. Taken from the cube
-// measurements in the implementation plan, where 128 MB batches read a cube materially faster than
-// 64 MB ones. It bounds working memory without bounding how many chunks a slab may span.
-constexpr std::size_t kDefaultSlabBudgetBytes = 128u << 20;
-
 // A region is bucketed once per chunk its bounding box touches. This bound turns a request whose
 // regions each cover the whole image -- legal, just not what this API is for -- into an error
 // rather than an allocation nothing can serve.
@@ -369,10 +364,12 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
     wanted_channels = std::min(wanted_channels, budget_channels);
 
     const bool apply_mask = options.apply_pixel_mask && descriptor.has_pixel_mask;
-    const std::size_t bytes_per_pixel = sizeof(float) + (apply_mask ? sizeof(std::uint8_t) : 0);
     const std::size_t slab_budget_bytes =
-        options.temporary_memory_limit_bytes != 0 ? options.temporary_memory_limit_bytes : kDefaultSlabBudgetBytes;
-    const std::uint64_t slab_budget_pixels = std::max<std::uint64_t>(1, slab_budget_bytes / bytes_per_pixel);
+        options.temporary_memory_limit_bytes != 0 ? options.temporary_memory_limit_bytes : kDecodedBytesPerRead;
+    // Budget the chunk data a slab decodes, not the pixels it keeps. A one-pixel region asks for
+    // almost nothing and still decodes an entire chunk per chunk it touches, so sizing by the
+    // region's own area would let a cursor-sized request pull an unbounded amount through.
+    const std::uint64_t chunk_bytes = DecodedChunkBytes(descriptor, geometry) * (apply_mask ? 2 : 1);
     // The smallest slab that still decodes each spectral chunk once. Reading fewer channels than
     // this would decode a chunk and use part of it, then decode it again for the rest.
     const std::uint64_t least_channels = ((chunk_depth + spectral.stride - 1) / spectral.stride);
@@ -416,9 +413,8 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
             for (const auto& run : runs) {
                 widest = std::max(widest, run.last - run.first + 1);
             }
-            const std::uint64_t row_pixels =
-                std::max<std::uint64_t>(1, widest * chunk_width * chunk_height * least_channels);
-            const std::uint64_t band_limit = std::max<std::uint64_t>(1, slab_budget_pixels / row_pixels);
+            const std::uint64_t row_bytes = std::max<std::uint64_t>(1, widest * chunk_bytes);
+            const std::uint64_t band_limit = std::max<std::uint64_t>(1, slab_budget_bytes / row_bytes);
             std::uint64_t band_end = row + 1;
             while (band_end < buckets.rows && (band_end - row) < band_limit &&
                    runs_per_row.at(static_cast<std::size_t>(band_end)) == runs) {
@@ -435,8 +431,11 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                 const std::uint64_t chunk_x_end = buckets.chunk_x0 + run.last + 1;
                 const std::uint64_t x_begin = std::max(buckets.x0, chunk_x_begin * chunk_width);
                 const std::uint64_t x_end = std::min(buckets.x1, chunk_x_end * chunk_width);
-                const std::uint64_t area = std::max<std::uint64_t>(1, (x_end - x_begin) * (y_end - y_begin));
-                const std::uint64_t slab_channels = std::max<std::uint64_t>(1, slab_budget_pixels / area);
+                const std::uint64_t run_chunks =
+                    std::max<std::uint64_t>(1, (run.last - run.first + 1) * (band_end - row));
+                const std::uint64_t spectral_chunks =
+                    std::max<std::uint64_t>(1, slab_budget_bytes / (run_chunks * chunk_bytes));
+                const std::uint64_t slab_channels = std::max<std::uint64_t>(1, spectral_chunks * least_channels);
 
                 for (std::uint64_t slab_begin = block_begin; slab_begin < block_end;) {
                     const std::uint64_t slab_end =

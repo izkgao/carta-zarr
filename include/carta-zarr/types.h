@@ -268,7 +268,12 @@ struct ReadOptions {
     // enough chunks to decode in parallel, and at that size a split read measures the same as an
     // unsplit one.
     std::function<bool(std::size_t elements_written, std::size_t elements_total)> progress;
-    // Maximum temporary memory available to apply the pixel mask. Zero means no explicit limit.
+    // Maximum temporary memory one piece of the read may use. Zero means the library's own budget.
+    //
+    // This bounds the pixel mask buffer, and it is also what a progressive read sizes its pieces
+    // by -- both are "how much this read may hold at once", and splitting to fit is a better answer
+    // than refusing. A read that cannot be split still reports buffer_too_small rather than
+    // allocating past the limit.
     std::size_t temporary_memory_limit_bytes = 0;
 };
 

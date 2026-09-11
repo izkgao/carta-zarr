@@ -146,10 +146,13 @@ std::optional<std::size_t> SlowestSelectedAxis(const ReadRequest& request) {
     return std::nullopt;
 }
 
-// How many elements of the split axis one piece should cover, so that the piece still holds enough
-// chunks to decode in parallel. The other axes already contribute whatever they span, so a plane
-// read needs far fewer rows per piece than a single-pixel column needs channels.
-std::uint64_t ChunksPerPiece(const ReadRequest& request, const ChunkGeometry& geometry, std::size_t axis) {
+// How many elements of the split axis one piece should cover, so that the piece pulls roughly the
+// budgeted amount of decompressed chunk data through. The other axes already contribute whatever
+// they span, so a plane read needs far fewer rows per piece than a single-pixel column needs
+// channels -- and an image with very large chunks gets pieces of one chunk rather than pieces it
+// could never afford.
+std::uint64_t ElementsPerPiece(const ImageDescriptor& descriptor, const ReadRequest& request,
+                               const ChunkGeometry& geometry, std::size_t axis, std::size_t budget_bytes) {
     std::uint64_t other_chunks = 1;
     for (std::size_t i = 0; i < request.axes.size(); ++i) {
         if (i == axis) {
@@ -159,12 +162,13 @@ std::uint64_t ChunksPerPiece(const ReadRequest& request, const ChunkGeometry& ge
         const auto& range = request.axes.at(i);
         other_chunks *= internal::ChunksSpanned(range.start, range.count, range.stride, chunk);
     }
-    const auto wanted = (internal::kMinChunksPerRead + other_chunks - 1) / std::max<std::uint64_t>(1, other_chunks);
+    const auto row_bytes = internal::DecodedChunkBytes(descriptor, geometry) * other_chunks;
+    // At least one chunk: a piece smaller than that would decode the same chunk twice.
+    const auto chunks = std::max<std::uint64_t>(1, budget_bytes / std::max<std::uint64_t>(1, row_bytes));
     const auto chunk = axis < geometry.chunk_shape.size() ? geometry.chunk_shape.at(axis) : 0;
-    const auto& range = request.axes.at(axis);
-    const auto stride = std::max<std::uint64_t>(1, range.stride);
+    const auto stride = std::max<std::uint64_t>(1, request.axes.at(axis).stride);
     // AlignedBlockEnd rounds this out to a whole chunk, so a low estimate costs nothing.
-    return std::max<std::uint64_t>(1, (wanted * std::max<std::uint64_t>(1, chunk)) / stride);
+    return std::max<std::uint64_t>(1, (chunks * std::max<std::uint64_t>(1, chunk)) / stride);
 }
 
 ChunkGeometry BuildChunkGeometry(const ImageDescriptor& descriptor, const StorageLayout& layout) {
@@ -240,11 +244,6 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
     }
 
     const bool apply_mask = options.apply_pixel_mask && _impl->descriptor.has_pixel_mask;
-    if (apply_mask && options.temporary_memory_limit_bytes != 0 && elements > options.temporary_memory_limit_bytes) {
-        return MakeError(ErrorCode::buffer_too_small,
-                         "Pixel mask temporary buffer exceeds the configured memory limit",
-                         _impl->descriptor.id);
-    }
 
     // One piece unless the caller asked to hear about progress, in which case the request is split
     // along its slowest-varying selected axis. Splitting anywhere else, or without aligning to the
@@ -267,7 +266,9 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
             slab_stride *= request.axes.at(i).count;
         }
         slab_chunk = axis < _impl->geometry.chunk_shape.size() ? _impl->geometry.chunk_shape.at(axis) : 0;
-        slab_step = ChunksPerPiece(request, _impl->geometry, axis);
+        const auto budget = options.temporary_memory_limit_bytes != 0 ? options.temporary_memory_limit_bytes
+                                                                       : internal::kDecodedBytesPerRead;
+        slab_step = ElementsPerPiece(_impl->descriptor, request, _impl->geometry, axis, budget);
     }
 
     auto* pixels = static_cast<float*>(destination.data);
@@ -293,6 +294,13 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
         float* piece_pixels = pixels + (begin * slab_stride);
 
         if (apply_mask) {
+            // The limit bounds a piece, and a read that is not split is one piece, so an
+            // unsplittable request that exceeds it still has to say so rather than allocate.
+            if (options.temporary_memory_limit_bytes != 0 && piece_elements > options.temporary_memory_limit_bytes) {
+                return MakeError(ErrorCode::buffer_too_small,
+                                 "Pixel mask temporary buffer exceeds the configured memory limit",
+                                 _impl->descriptor.id);
+            }
             mask.assign(piece_elements, 0);
             // The mask is read first so that an unavailable or cancelled mask cannot leave this
             // piece of the destination updated. TensorStore still owns the pixel operation's

@@ -7,22 +7,54 @@
 #ifndef CARTA_ZARR_SRC_CHUNK_BLOCKS_H_
 #define CARTA_ZARR_SRC_CHUNK_BLOCKS_H_
 
+#include "carta-zarr/types.h"
+
 #include <algorithm>
 #include <cstdint>
 
 namespace carta::zarr::internal {
 
-// Enough chunks in one storage request to keep the decode pool busy.
+// How much decompressed chunk data one storage request should pull through.
 //
-// Measured on two cubes by reading one cursor column in differently sized pieces. One chunk per
-// request is 5 to 7 times slower than reading the whole column at once, and four is still about
-// twice as slow -- not because a request costs anything much, but because a request holding one
-// chunk has nothing to decode in parallel. From sixteen chunks upwards the difference disappears,
-// and at sixty-four a split read is as fast as an unsplit one or faster.
+// Two things set this, and they pull in opposite directions. Below about 16 MiB a request stops
+// holding enough chunks to decode in parallel: measured by reading one cursor column of 1 MiB
+// chunks in pieces, one chunk per request is 7x slower than one unsplit read and four chunks is
+// still 2x, not because a request costs anything but because a request holding one chunk has
+// nothing to spread over the decode threads. Above about 100 MiB a piece takes longer than the
+// interval a caller wants to report progress on, which is the reason for splitting at all.
 //
-// This is a fact about the storage, not a caller's tuning knob, which is why splitting a read is
-// decided here rather than by whoever is asking for pixels.
-inline constexpr std::uint64_t kMinChunksPerRead = 64;
+// 64 MiB sits between them with room on both sides: four times the floor, and about a third of a
+// second of decoding at the rates these images decompress at.
+//
+// This is a byte budget rather than a chunk count because chunk sizes are not comparable across
+// real images -- the four cubes measured here span 0.12 MiB to 48 MiB per chunk, a factor of 400.
+// A fixed count of 64 would mean 8 MiB pieces on one of them and 3 GiB pieces on another, and the
+// one with the largest chunks would end up never splitting at all.
+inline constexpr std::size_t kDecodedBytesPerRead = 64u << 20;
+
+// Bytes one chunk of this image decompresses to.
+inline std::uint64_t DecodedChunkBytes(const ImageDescriptor& descriptor, const ChunkGeometry& geometry) {
+    std::uint64_t elements = 1;
+    for (const auto length : geometry.chunk_shape) {
+        elements *= std::max<std::uint64_t>(1, length);
+    }
+    std::uint64_t element_bytes = 4;
+    switch (descriptor.stored_type) {
+        case DataType::boolean:
+        case DataType::int8:
+        case DataType::uint8: element_bytes = 1; break;
+        case DataType::int16:
+        case DataType::uint16:
+        case DataType::float16: element_bytes = 2; break;
+        case DataType::int64:
+        case DataType::uint64:
+        case DataType::float64:
+        case DataType::complex64: element_bytes = 8; break;
+        case DataType::complex128: element_bytes = 16; break;
+        default: element_bytes = 4; break;
+    }
+    return std::max<std::uint64_t>(1, elements * element_bytes);
+}
 
 // The end of a block of selected indices that begins at `begin` and would like to be `desired`
 // long, moved so that it lands on a chunk boundary.
