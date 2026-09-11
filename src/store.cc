@@ -385,28 +385,30 @@ Result<std::filesystem::path> Store::ResolveArrayDirectory(std::string_view node
 }
 
 Result<void> Store::ReadPixelsFloat32(std::string_view node, const zarr::PixelSelection& selection,
-                                      float* destination, std::size_t destination_elements) const {
+                                      float* destination, std::size_t destination_elements,
+                                      const ReadOptions& options) const {
     try {
         auto target_path = ResolveArrayDirectory(node);
         if (!target_path) {
             return target_path.error();
         }
         return zarr_metadata::ReadFloat32(target_path.value(), _context, node, selection, destination,
-                                          destination_elements);
+                                           destination_elements, options);
     } catch (const std::exception& e) {
         return MakeError(ErrorCode::io_error, e.what(), std::string(node));
     }
 }
 
 Result<void> Store::ReadPixelMaskBytes(std::string_view node, const zarr::PixelSelection& selection,
-                                       std::uint8_t* destination, std::size_t destination_elements) const {
+                                       std::uint8_t* destination, std::size_t destination_elements,
+                                       const ReadOptions& options) const {
     try {
         auto target_path = ResolveArrayDirectory(node);
         if (!target_path) {
             return target_path.error();
         }
         return zarr_metadata::ReadMaskBytes(target_path.value(), _context, node, selection, destination,
-                                            destination_elements);
+                                            destination_elements, options);
     } catch (const std::exception& e) {
         return MakeError(ErrorCode::io_error, e.what(), std::string(node));
     }

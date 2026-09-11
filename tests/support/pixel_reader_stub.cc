@@ -31,12 +31,12 @@ std::uint64_t SelectionElementCount(const PixelSelection& selection) {
 }
 
 Result<void> ReadFloat32(const std::filesystem::path&, const StoreContextPtr&, std::string_view node,
-                         const PixelSelection&, float*, std::size_t) {
+                         const PixelSelection&, float*, std::size_t, const ReadOptions&) {
     return Error{ErrorCode::unsupported_transport, "This build reads no pixels", std::string(node)};
 }
 
 Result<void> ReadMaskBytes(const std::filesystem::path&, const StoreContextPtr&, std::string_view node,
-                           const PixelSelection&, std::uint8_t*, std::size_t) {
+                           const PixelSelection&, std::uint8_t*, std::size_t, const ReadOptions&) {
     return Error{ErrorCode::unsupported_transport, "This build reads no pixels", std::string(node)};
 }
 

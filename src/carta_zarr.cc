@@ -250,27 +250,42 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
     }
 
     auto* pixels = static_cast<float*>(destination.data);
-    // Read as one request. Splitting it into chunk-aligned slabs was tried and measured slightly
-    // slower on real data (360 ms against 348 for a 7763 x 4742 plane), so the region is handed to
-    // TensorStore whole and it decides how to fetch the chunks.
-    auto read = _impl->store->ReadPixelsFloat32(_impl->descriptor.id, selection.value(), pixels,
-                                                static_cast<std::size_t>(elements));
-    if (!read) {
-        return read.error();
-    }
-
     if (options.apply_pixel_mask && _impl->descriptor.has_pixel_mask) {
+        if (options.temporary_memory_limit_bytes != 0 &&
+            elements > options.temporary_memory_limit_bytes) {
+            return MakeError(ErrorCode::buffer_too_small,
+                             "Pixel mask temporary buffer exceeds the configured memory limit",
+                             _impl->descriptor.id);
+        }
         std::vector<std::uint8_t> mask(static_cast<std::size_t>(elements));
         auto mask_read = _impl->store->ReadPixelMaskBytes(_impl->descriptor.pixel_mask_id, selection.value(),
-                                                          mask.data(), mask.size());
+                                                          mask.data(), mask.size(), options);
         if (!mask_read) {
             return mask_read.error();
+        }
+
+        // Read the mask first so an unavailable or cancelled mask cannot leave a partially updated
+        // destination. TensorStore still owns the pixel operation's in-flight completion before it
+        // returns, so the destination remains valid for the next read.
+        auto read = _impl->store->ReadPixelsFloat32(_impl->descriptor.id, selection.value(), pixels,
+                                                    static_cast<std::size_t>(elements), options);
+        if (!read) {
+            return read.error();
         }
         // XRADIO stores flags with true meaning a good pixel.
         for (std::size_t i = 0; i < mask.size(); ++i) {
             if (mask.at(i) == 0) {
                 pixels[i] = std::numeric_limits<float>::quiet_NaN();
             }
+        }
+    } else {
+        // Read as one request. Splitting it into chunk-aligned slabs was tried and measured slightly
+        // slower on real data (360 ms against 348 for a 7763 x 4742 plane), so the region is handed to
+        // TensorStore whole and it decides how to fetch the chunks.
+        auto read = _impl->store->ReadPixelsFloat32(_impl->descriptor.id, selection.value(), pixels,
+                                                    static_cast<std::size_t>(elements), options);
+        if (!read) {
+            return read.error();
         }
     }
     return static_cast<std::size_t>(elements);
@@ -296,7 +311,7 @@ Result<std::size_t> Image::ReadPixelMask(const ReadRequest& request, MutableBuff
 
     auto read = _impl->store->ReadPixelMaskBytes(_impl->descriptor.pixel_mask_id, selection.value(),
                                                  static_cast<std::uint8_t*>(destination.data),
-                                                 static_cast<std::size_t>(elements));
+                                                 static_cast<std::size_t>(elements), ReadOptions{});
     if (!read) {
         return read.error();
     }

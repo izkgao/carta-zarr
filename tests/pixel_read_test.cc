@@ -12,6 +12,7 @@
 #include <carta-zarr/carta_zarr.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -248,6 +249,34 @@ void TestRejectedRequests(const carta::zarr::Image& sky) {
             "a short destination is an invalid argument");
 }
 
+void TestReadControls(const carta::zarr::Image& sky) {
+    const auto request = WholeImage(sky.descriptor());
+    const std::size_t elements = kL * kM * kFrequency * kPolarization * kTime;
+    std::vector<float> pixels(elements, 123.0F);
+
+    carta::zarr::ReadOptions cancelled;
+    cancelled.cancellation_requested = [] { return true; };
+    const auto cancelled_read = sky.Read(request, {pixels.data(), pixels.size() * sizeof(float)}, cancelled);
+    Require(!cancelled_read && cancelled_read.error().code == carta::zarr::ErrorCode::cancelled,
+            "a cancelled read was not rejected");
+    Require(std::all_of(pixels.begin(), pixels.end(), [](float value) { return value == 123.0F; }),
+            "a cancelled read modified its destination");
+
+    carta::zarr::ReadOptions expired;
+    expired.deadline = std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
+    const auto expired_read = sky.Read(request, {pixels.data(), pixels.size() * sizeof(float)}, expired);
+    Require(!expired_read && expired_read.error().code == carta::zarr::ErrorCode::cancelled,
+            "a read past its deadline was not rejected");
+
+    carta::zarr::ReadOptions over_budget;
+    over_budget.temporary_memory_limit_bytes = elements - 1;
+    const auto budget_read = sky.Read(request, {pixels.data(), pixels.size() * sizeof(float)}, over_budget);
+    Require(!budget_read && budget_read.error().code == carta::zarr::ErrorCode::buffer_too_small,
+            "a masked read over its temporary memory budget was not rejected");
+    Require(std::all_of(pixels.begin(), pixels.end(), [](float value) { return value == 123.0F; }),
+            "a masked read rejected for memory budget modified its destination");
+}
+
 // The header promises that one handle may be read from any number of threads. This cannot prove
 // the absence of a race, but it does fail loudly if the shared state a read touches is not actually
 // read-only, and it pins the contract next to the code that has to keep it.
@@ -303,6 +332,7 @@ int main() {
         TestPixelMask(sky);
         TestMaskFusion(sky);
         TestRejectedRequests(sky);
+        TestReadControls(sky);
         TestConcurrentReads(sky);
     } catch (const std::exception& error) {
         std::cerr << "pixel read test failed: " << error.what() << "\n";

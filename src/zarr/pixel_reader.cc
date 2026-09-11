@@ -19,6 +19,7 @@
 #include <tensorstore/util/result.h>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <limits>
 #include <string>
@@ -29,6 +30,16 @@ namespace {
 
 Error MakeError(ErrorCode code, std::string message, std::string node_path = {}) {
     return Error{code, std::move(message), std::move(node_path)};
+}
+
+Result<void> CheckReadControl(const ReadOptions& options, std::string_view node) {
+    if (options.cancellation_requested && options.cancellation_requested()) {
+        return MakeError(ErrorCode::cancelled, "Pixel read was cancelled", std::string(node));
+    }
+    if (std::chrono::steady_clock::now() >= options.deadline) {
+        return MakeError(ErrorCode::cancelled, "Pixel read deadline expired", std::string(node));
+    }
+    return {};
 }
 
 bool SelectionIsWellFormed(const PixelSelection& selection) {
@@ -51,7 +62,7 @@ bool SelectionIsWellFormed(const PixelSelection& selection) {
 template <typename Element>
 Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContextPtr& context,
                       std::string_view node, const PixelSelection& selection, tensorstore::DataType target_dtype,
-                      Element* destination, std::size_t destination_elements) {
+                      Element* destination, std::size_t destination_elements, const ReadOptions& options) {
     if (destination == nullptr) {
         return MakeError(ErrorCode::invalid_argument, "Destination buffer is null", std::string(node));
     }
@@ -70,12 +81,21 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
         return MakeError(ErrorCode::invalid_argument, "Pixel reads require a context", std::string(node));
     }
 
+    auto control = CheckReadControl(options, node);
+    if (!control) {
+        return control.error();
+    }
+
     try {
         // Reused across calls. A slice read happens once per casacore cursor step, so opening here
         // would make a fixed cost a per-call one.
         auto opened = context->OpenArray(array_path, node);
         if (!opened) {
             return opened.error();
+        }
+        control = CheckReadControl(options, node);
+        if (!control) {
+            return control.error();
         }
         auto const store = std::move(opened).value();
         const auto rank = selection.start.size();
@@ -135,7 +155,7 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
             return MakeError(ErrorCode::io_error, "TensorStore read failed: " + read_result.status().ToString(),
                              std::string(node));
         }
-        return Result<void>{};
+        return CheckReadControl(options, node);
     } catch (const std::exception& error) {
         return MakeError(ErrorCode::io_error, error.what(), std::string(node));
     }
@@ -159,16 +179,16 @@ std::uint64_t SelectionElementCount(const PixelSelection& selection) {
 
 Result<void> ReadFloat32(const std::filesystem::path& array_path, const StoreContextPtr& context,
                          std::string_view node, const PixelSelection& selection, float* destination,
-                         std::size_t destination_elements) {
+                         std::size_t destination_elements, const ReadOptions& options) {
     return ReadInto(array_path, context, node, selection, tensorstore::dtype_v<float>, destination,
-                    destination_elements);
+                    destination_elements, options);
 }
 
 Result<void> ReadMaskBytes(const std::filesystem::path& array_path, const StoreContextPtr& context,
                            std::string_view node, const PixelSelection& selection, std::uint8_t* destination,
-                           std::size_t destination_elements) {
+                           std::size_t destination_elements, const ReadOptions& options) {
     return ReadInto(array_path, context, node, selection, tensorstore::dtype_v<bool>,
-                    reinterpret_cast<bool*>(destination), destination_elements);
+                    reinterpret_cast<bool*>(destination), destination_elements, options);
 }
 
 }  // namespace carta::zarr::internal::zarr

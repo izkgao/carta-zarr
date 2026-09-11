@@ -10,8 +10,10 @@
 #include "carta-zarr/error.h"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -245,6 +247,15 @@ struct ReadOptions {
     // a pixel read plus a mask read. On by default: masking during the read costs one pass over
     // data already in hand, while a caller doing it afterwards pays for a second traversal.
     bool apply_pixel_mask = true;
+    // Cooperative cancellation checked before and after each storage operation. The callback
+    // must be safe to invoke from the calling thread.
+    std::function<bool()> cancellation_requested;
+    // A steady-clock deadline checked at the same storage-operation boundaries. An in-flight
+    // TensorStore operation is not interrupted, but a request never starts another operation once
+    // this deadline has passed.
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    // Maximum temporary memory available to apply the pixel mask. Zero means no explicit limit.
+    std::size_t temporary_memory_limit_bytes = 0;
 };
 
 struct MutableBufferView {

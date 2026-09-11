@@ -85,9 +85,11 @@ public:
     // anything the metadata tables hold. Reuse belongs in TensorStore's chunk cache, which already
     // works at chunk granularity and is sized by the consumer's Context.
     Result<void> ReadPixelsFloat32(std::string_view node, const zarr::PixelSelection& selection,
-                                   float* destination, std::size_t destination_elements) const;
+                                   float* destination, std::size_t destination_elements,
+                                   const ReadOptions& options) const;
     Result<void> ReadPixelMaskBytes(std::string_view node, const zarr::PixelSelection& selection,
-                                    std::uint8_t* destination, std::size_t destination_elements) const;
+                                    std::uint8_t* destination, std::size_t destination_elements,
+                                    const ReadOptions& options) const;
 
 private:
     Result<std::filesystem::path> ResolveArrayDirectory(std::string_view node) const;
