@@ -356,6 +356,92 @@ void TestAnUnfinishedBlockIsHandedOver(const carta::zarr::Image& sky) {
     CheckAgainstOracle(collected, regions, 0, "handed over as it filled");
 }
 
+// The run-length form of a raster, which is what a caller is expected to hand over and what the
+// backend derives from casacore's mask. Written the obvious way on purpose: it is the reference the
+// library's own use of the runs is checked against.
+struct Runs {
+    std::vector<std::uint32_t> runs;
+    std::vector<std::uint64_t> offsets;
+};
+
+Runs RunsOf(const std::vector<std::uint8_t>& raster, std::uint64_t width, std::uint64_t height) {
+    Runs out;
+    out.offsets.push_back(0);
+    for (std::uint64_t y = 0; y < height; ++y) {
+        std::uint64_t x = 0;
+        while (x < width) {
+            while (x < width && raster.at(static_cast<std::size_t>((y * width) + x)) == 0) {
+                ++x;
+            }
+            if (x == width) {
+                break;
+            }
+            const auto begin = static_cast<std::uint32_t>(x);
+            while (x < width && raster.at(static_cast<std::size_t>((y * width) + x)) != 0) {
+                ++x;
+            }
+            out.runs.push_back(begin);
+            out.runs.push_back(static_cast<std::uint32_t>(x));
+        }
+        out.offsets.push_back(out.runs.size() / 2);
+    }
+    return out;
+}
+
+// Runs are the selection when they are given, and they have to select what the raster would. The
+// pattern here is chosen so that a row is two runs with a hole between them, a row is no runs at
+// all, and a run crosses the chunk boundary at l = 2 -- the three shapes a wrong index or a wrong
+// clip would get away with on a solid rectangle.
+void TestRunsSelectTheSamePixelsAsTheRaster(const carta::zarr::Image& sky) {
+    std::vector<std::uint8_t> raster(static_cast<std::size_t>(kL) * static_cast<std::size_t>(kM), 0);
+    for (std::uint64_t y = 0; y < kM; ++y) {
+        if (y == 2) {
+            continue;  // an empty row
+        }
+        for (std::uint64_t x = 0; x < kL; ++x) {
+            raster.at(static_cast<std::size_t>((y * kL) + x)) = ((x + (2 * y)) % 3) != 0 ? 1 : 0;
+        }
+    }
+    const auto runs = RunsOf(raster, kL, kM);
+    Require(runs.offsets.at(3) == runs.offsets.at(2), "row 2 should have no runs");
+    Require(runs.offsets.at(2) - runs.offsets.at(1) == 2, "row 1 should be two runs with a hole");
+
+    const std::vector<carta::zarr::RegionMask> by_raster{{0, 0, kL, kM, raster.data()}};
+    std::vector<carta::zarr::RegionMask> by_runs{{0, 0, kL, kM, nullptr}};
+    by_runs.at(0).row_runs = runs.runs.data();
+    by_runs.at(0).row_run_offsets = runs.offsets.data();
+
+    const auto from_raster = Collect(sky, WholeSpectrum(by_raster, 0));
+    const auto from_runs = Collect(sky, WholeSpectrum(by_runs, 0));
+    CheckAgainstOracle(from_raster, by_raster, 0, "raster");
+    Require(from_raster.values.size() == from_runs.values.size(), "both forms should report the same shape");
+    for (std::size_t i = 0; i < from_raster.values.size(); ++i) {
+        RequireClose(from_runs.values.at(i), from_raster.values.at(i),
+                     "runs and raster should select the same pixels at value " + std::to_string(i));
+    }
+}
+
+// And the runs narrow the chunk index the same way the raster does, without the raster being there.
+void TestRunsNarrowTheChunksTheWalkReads(const carta::zarr::Image& sky) {
+    std::vector<std::uint8_t> raster(static_cast<std::size_t>(kL) * static_cast<std::size_t>(kM), 0);
+    for (std::uint64_t y = 0; y < kM; ++y) {
+        for (std::uint64_t x = 0; x < 2; ++x) {  // the left chunk only
+            raster.at(static_cast<std::size_t>((y * kL) + x)) = 1;
+        }
+    }
+    const auto runs = RunsOf(raster, kL, kM);
+    std::vector<carta::zarr::RegionMask> regions{{0, 0, kL, kM, nullptr}};
+    regions.at(0).row_runs = runs.runs.data();
+    regions.at(0).row_run_offsets = runs.offsets.data();
+
+    carta::zarr::ReadOptions options;
+    options.temporary_memory_limit_bytes = 40;  // one chunk of the fixture
+    const auto collected = Collect(sky, WholeSpectrum(regions, 0), options);
+    Require(collected.partial_counts.empty(),
+            "runs confined to one chunk should make the walk read one chunk; a hand-over on the way "
+            "means it read the second one too");
+}
+
 // A region is indexed by the chunks its mask occupies, not by the chunks its bounding box covers.
 // The two differ whenever a region is thin and slanted: a three-pixel-wide rectangle along the
 // diagonal of an image has a bounding box the size of the image, and bucketing by the box reads
@@ -475,6 +561,8 @@ int main() {
     TestABigRegionIsEmittedALayerAtATime(sky);
     TestAnUnfinishedBlockIsHandedOver(sky);
     TestAMaskNarrowsTheChunksTheWalkReads(sky);
+    TestRunsSelectTheSamePixelsAsTheRaster(sky);
+    TestRunsNarrowTheChunksTheWalkReads(sky);
         TestSinkCancels(sky);
         TestRejectedRequests(sky);
     } catch (const std::exception& error) {

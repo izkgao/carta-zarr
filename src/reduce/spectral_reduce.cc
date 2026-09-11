@@ -141,11 +141,50 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
     const auto for_each_cell = [&](const RegionMask& region, auto&& visit) {
         std::uint64_t cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
         span(region, cx0, cx1, cy0, cy1);
-        if (region.mask == nullptr) {
+        if (region.row_runs == nullptr && region.mask == nullptr) {
             for (auto cy = cy0; cy <= cy1; ++cy) {
                 for (auto cx = cx0; cx <= cx1; ++cx) {
                     visit(cx, cy);
                 }
+            }
+            return;
+        }
+
+        const auto flush = [&](std::uint64_t cy, const std::vector<std::uint8_t>& marks) {
+            for (auto cx = cx0; cx <= cx1; ++cx) {
+                if (marks.at(static_cast<std::size_t>(cx - cx0)) != 0) {
+                    visit(cx, cy);
+                }
+            }
+        };
+
+        if (region.row_runs != nullptr) {
+            const std::uint64_t columns = cx1 - cx0 + 1;
+            occupied.assign(static_cast<std::size_t>(columns), 0);
+            for (auto cy = cy0; cy <= cy1; ++cy) {
+                std::fill(occupied.begin(), occupied.end(), std::uint8_t{0});
+                std::uint64_t found = 0;
+                const std::uint64_t y_first = std::max(region.y_start, cy * chunk_height);
+                const std::uint64_t y_last = std::min(region.y_start + region.height, (cy + 1) * chunk_height);
+                for (std::uint64_t y = y_first; y < y_last && found < columns; ++y) {
+                    const auto r = static_cast<std::size_t>(y - region.y_start);
+                    for (auto k = region.row_run_offsets[r]; k < region.row_run_offsets[r + 1]; ++k) {
+                        const std::uint64_t run_begin = region.x_start + region.row_runs[2 * k];
+                        const std::uint64_t run_end = region.x_start + region.row_runs[(2 * k) + 1];
+                        if (run_begin >= run_end) {
+                            continue;
+                        }
+                        for (auto column = run_begin / chunk_width; column <= (run_end - 1) / chunk_width;
+                             ++column) {
+                            auto& seen = occupied.at(static_cast<std::size_t>(column - cx0));
+                            if (seen == 0) {
+                                seen = 1;
+                                ++found;
+                            }
+                        }
+                    }
+                }
+                flush(cy, occupied);
             }
             return;
         }
@@ -177,11 +216,7 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
                     x = boundary;
                 }
             }
-            for (std::uint64_t cx = cx0; cx <= cx1; ++cx) {
-                if (occupied.at(static_cast<std::size_t>(cx - cx0)) != 0) {
-                    visit(cx, cy);
-                }
-            }
+            flush(cy, occupied);
         }
     };
 
@@ -310,12 +345,14 @@ void AccumulateRow(const float* row, std::uint64_t stride, std::uint64_t count, 
         largest = std::max(largest, finite ? clean : -kInfinity);
     }
 
-    totals.good = good;
-    totals.bad = selected_count - good;
-    totals.sum = sum;
-    totals.sum_sq = sum_sq;
-    totals.smallest = smallest;
-    totals.largest = largest;
+    // Added rather than assigned: a row described by runs is several spans, and they share one set
+    // of totals. A row that is one span starts from the same zeros and reaches the same answer.
+    totals.good += good;
+    totals.bad += selected_count - good;
+    totals.sum += sum;
+    totals.sum_sq += sum_sq;
+    totals.smallest = std::min(totals.smallest, smallest);
+    totals.largest = std::max(totals.largest, largest);
 }
 
 // A maximal run of consecutive chunk columns that at least one region touches, in bounding-box
@@ -702,6 +739,37 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
 
                                     double* out = accumulator.data() + (r * region_stride);
                                     for (std::uint64_t y = ry0; y < ry1; ++y) {
+                                        RowTotals totals;
+                                        if (region.row_runs != nullptr) {
+                                            // Every pixel of a run is selected, so each one goes
+                                            // through the same loop an unmasked region uses and the
+                                            // per-pixel test never happens.
+                                            const auto r = static_cast<std::size_t>(y - region.y_start);
+                                            for (auto k = region.row_run_offsets[r];
+                                                 k < region.row_run_offsets[r + 1]; ++k) {
+                                                const std::uint64_t run_begin =
+                                                    region.x_start + region.row_runs[2 * k];
+                                                if (run_begin >= rx1) {
+                                                    break;  // runs ascend, so the rest are past the cell
+                                                }
+                                                const std::uint64_t run_end =
+                                                    region.x_start + region.row_runs[(2 * k) + 1];
+                                                const std::uint64_t first = std::max(rx0, run_begin);
+                                                const std::uint64_t last = std::min(rx1, run_end);
+                                                if (first >= last) {
+                                                    continue;
+                                                }
+                                                const float* span = plane + ((y - y_begin) * stride_y) +
+                                                                    ((first - x_begin) * stride_x);
+                                                if (stride_x == 1) {
+                                                    AccumulateRow<true, false>(span, 1, last - first, nullptr,
+                                                                               totals);
+                                                } else {
+                                                    AccumulateRow<false, false>(span, stride_x, last - first,
+                                                                                nullptr, totals);
+                                                }
+                                            }
+                                        } else {
                                         const float* pixel_row =
                                             plane + ((y - y_begin) * stride_y) + ((rx0 - x_begin) * stride_x);
                                         const std::uint8_t* selected =
@@ -709,7 +777,6 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                                                 ? nullptr
                                                 : region.mask + ((y - region.y_start) * region.width) +
                                                       (rx0 - region.x_start);
-                                        RowTotals totals;
                                         const std::uint64_t run = rx1 - rx0;
                                         if (stride_x == 1) {
                                             if (selected == nullptr) {
@@ -721,6 +788,7 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                                             AccumulateRow<false, false>(pixel_row, stride_x, run, nullptr, totals);
                                         } else {
                                             AccumulateRow<false, true>(pixel_row, stride_x, run, selected, totals);
+                                        }
                                         }
 
                                         if (slot_num_pixels >= 0) {
