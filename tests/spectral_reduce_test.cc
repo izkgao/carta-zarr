@@ -132,6 +132,10 @@ struct Collected {
         }
         return values.at(((region * statistics.size()) + slot) * channel_count + channel);
     }
+
+    // What each unfinished hand-over of a block said region 0 had counted so far, against the
+    // channel the block starts at.
+    std::vector<std::pair<std::uint64_t, double>> partial_counts;
 };
 
 Collected Collect(const carta::zarr::Image& sky, const carta::zarr::SpectralReduceRequest& request,
@@ -146,6 +150,18 @@ Collected Collect(const carta::zarr::Image& sky, const carta::zarr::SpectralRedu
         Require(block.value_count ==
                     collected.region_count * block.statistic_count * static_cast<std::size_t>(block.channel_count),
                 "a block's value count should match its strides");
+        if (!block.complete) {
+            Require(block.completeness > 0.0 && block.completeness < 1.0,
+                    "an unfinished block should report a fraction of itself");
+            for (std::size_t s = 0; s < block.statistic_count; ++s) {
+                if (block.statistics[s] == carta::zarr::Statistic::num_pixels) {
+                    collected.partial_counts.emplace_back(
+                        block.first_channel, block.values[s * block.statistic_stride]);
+                }
+            }
+            return true;
+        }
+        Require(block.completeness == 1.0, "a finished block is all of itself");
         next_channel += block.channel_count;
         collected.block_lengths.push_back(block.channel_count);
         if (collected.statistics.empty()) {
@@ -314,6 +330,32 @@ void TestEmitGranularityIsReported(const carta::zarr::Image& sky) {
 // spend the whole budget on one spectral layer therefore reports a layer at a time, which is the
 // case that matters: on a real image that is the difference between a partial profile every 70 ms
 // and one silent block lasting minutes.
+// A block that takes more than one read is handed over as it fills, so that a caller has something
+// to show and somewhere to stop before its last pixel arrives. The unfinished values are partial
+// sums over the chunks read so far, so what is checked here is that they converge and that the
+// finished block is unaffected -- in particular that putting the extremum identities back after a
+// hand-over leaves the walk able to keep accumulating into them.
+void TestAnUnfinishedBlockIsHandedOver(const carta::zarr::Image& sky) {
+    const std::vector<carta::zarr::RegionMask> regions{{0, 0, kL, kM, nullptr}};
+    carta::zarr::ReadOptions options;
+    // One chunk of the fixture, so the plane's two chunks cannot be read together.
+    options.temporary_memory_limit_bytes = 40;
+    const auto collected = Collect(sky, WholeSpectrum(regions, 0), options);
+    Require(!collected.partial_counts.empty(),
+            "a budget of one chunk should take more than one read for a plane two chunks wide; if "
+            "the fixture's chunk shape changed, this no longer splits and the test stops testing it");
+
+    bool saw_growth = false;
+    for (const auto& [first_channel, counted] : collected.partial_counts) {
+        const double finished = collected.At(0, carta::zarr::Statistic::num_pixels, first_channel);
+        Require(counted <= finished, "an unfinished block cannot have counted more than the finished one");
+        saw_growth = saw_growth || counted < finished;
+    }
+    Require(saw_growth, "at least one hand-over should have happened before the block was complete");
+
+    CheckAgainstOracle(collected, regions, 0, "handed over as it filled");
+}
+
 void TestABigRegionIsEmittedALayerAtATime(const carta::zarr::Image& sky) {
     const std::vector<carta::zarr::RegionMask> regions{{0, 0, kL, kM, nullptr}};
     const auto& chunk = sky.chunk_geometry().chunk_shape;
@@ -398,6 +440,7 @@ int main() {
         TestStrideSelectsChannels(sky);
         TestEmitGranularityIsReported(sky);
     TestABigRegionIsEmittedALayerAtATime(sky);
+    TestAnUnfinishedBlockIsHandedOver(sky);
         TestSinkCancels(sky);
         TestRejectedRequests(sky);
     } catch (const std::exception& error) {

@@ -392,6 +392,17 @@ struct SpectralBlock {
     std::size_t statistic_stride = 0;
     const Statistic* statistics = nullptr;
     std::size_t statistic_count = 0;
+    // Whether these values are final. A reduction whose block spans more than one read hands the
+    // block over as it fills, so that a caller has something to show and somewhere to stop long
+    // before the last pixel of the block is read. The same channels arrive again, refined, and a
+    // last time with complete set; a caller that only wants finished answers ignores the rest.
+    //
+    // The statistics of an unfinished block are honest over the pixels read so far: the counts and
+    // sums are partial and grow, the extrema are over a subset, and anything derived from them --
+    // a mean, an RMS -- is an estimate that converges. NumPixels says how much is behind them.
+    bool complete = true;
+    // The fraction of this block's chunks that are in the values, in [0, 1]. One when complete.
+    double completeness = 1.0;
 };
 
 // Called once per block, on the thread that called ReduceSpectral. Returning false cancels the

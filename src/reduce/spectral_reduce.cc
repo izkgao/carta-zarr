@@ -400,6 +400,7 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
     std::vector<double> accumulator;
     std::vector<float> pixels;
     std::vector<std::uint8_t> mask;
+    std::vector<ColumnRun> segments;
 
     for (std::uint64_t block_begin = 0; block_begin < spectral.count;) {
         const std::uint64_t block_end = AlignedBlockEnd(block_begin, wanted_channels, spectral.count,
@@ -421,6 +422,64 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                 std::fill(base, base + block_length, -kInfinity);
             }
         }
+
+        const std::uint64_t block_spectral_chunks = (block_length + least_channels - 1) / least_channels;
+        const std::uint64_t block_chunks_total =
+            std::max<std::uint64_t>(1, std::max<std::uint64_t>(1, layer_chunks) * block_spectral_chunks);
+        std::uint64_t block_chunks_done = 0;
+        std::uint64_t reads_done = 0;
+
+        // An extremum nothing contributed to is still its identity, which is the one value it must
+        // not be reported as. Finding those needs no extra bookkeeping: a finite pixel can never
+        // leave an infinity behind, so only the untouched entries are still infinite -- and by the
+        // same argument the NaN that replaced one is the only NaN there, so the identity can be put
+        // back when the walk is not finished with it.
+        const auto settle_extrema = [&](bool report) {
+            for (std::size_t r = 0; r < request.region_count; ++r) {
+                for (const int slot : {slot_min, slot_max}) {
+                    if (slot < 0) {
+                        continue;
+                    }
+                    const double identity = slot == slot_min ? kInfinity : -kInfinity;
+                    auto* base = accumulator.data() + (r * region_stride) +
+                                 (static_cast<std::size_t>(slot) * statistic_stride);
+                    for (std::size_t c = 0; c < block_length; ++c) {
+                        if (report) {
+                            if (std::isinf(base[c])) {
+                                base[c] = std::numeric_limits<double>::quiet_NaN();
+                            }
+                        } else if (std::isnan(base[c])) {
+                            base[c] = identity;
+                        }
+                    }
+                }
+            }
+        };
+
+        const auto hand_over = [&](bool complete) -> Result<void> {
+            settle_extrema(true);
+            SpectralBlock block;
+            block.first_channel = block_begin;
+            block.channel_count = block_length;
+            block.values = accumulator.data();
+            block.value_count = accumulator.size();
+            block.region_stride = region_stride;
+            block.statistic_stride = statistic_stride;
+            block.statistics = statistics.data();
+            block.statistic_count = statistic_count;
+            block.complete = complete;
+            block.completeness =
+                complete ? 1.0
+                         : static_cast<double>(block_chunks_done) / static_cast<double>(block_chunks_total);
+            const bool keep_going = sink(block);
+            if (!complete) {
+                settle_extrema(false);
+            }
+            if (!keep_going) {
+                return MakeError(ErrorCode::cancelled, "The spectral reduction was cancelled by its sink", node);
+            }
+            return {};
+        };
 
         for (std::uint64_t row = 0; row < buckets.rows;) {
             const auto& runs = runs_per_row.at(static_cast<std::size_t>(row));
@@ -448,7 +507,23 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
             const std::uint64_t y_begin = std::max(buckets.y0, chunk_y_begin * chunk_height);
             const std::uint64_t y_end = std::min(buckets.y1, chunk_y_end * chunk_height);
 
-            for (const auto& run : runs) {
+            // A run wider than the budget is read in pieces, not in one request. Without this the
+            // smallest request is a whole chunk row of the region: 157 chunks of a 80000-pixel-wide
+            // region is 628 MiB, ten times the budget it was supposed to respect, and nothing to
+            // report or cancel from until all of it lands.
+            const std::uint64_t band_rows = std::max<std::uint64_t>(1, band_end - row);
+            const std::uint64_t segment_limit =
+                std::max<std::uint64_t>(1, slab_budget_bytes / (band_rows * chunk_bytes));
+            segments.clear();
+            for (const auto& whole : runs) {
+                for (std::uint64_t first = whole.first; first <= whole.last;) {
+                    const std::uint64_t width = std::min(segment_limit, whole.last - first + 1);
+                    segments.push_back(ColumnRun{first, first + width - 1});
+                    first += width;
+                }
+            }
+
+            for (const auto& run : segments) {
                 const std::uint64_t chunk_x_begin = buckets.chunk_x0 + run.first;
                 const std::uint64_t chunk_x_end = buckets.chunk_x0 + run.last + 1;
                 const std::uint64_t x_begin = std::max(buckets.x0, chunk_x_begin * chunk_width);
@@ -464,6 +539,15 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                         AlignedBlockEnd(slab_begin, std::min(slab_channels, block_end - slab_begin), block_end,
                                         spectral.start, spectral.stride, chunk_depth);
                     const std::uint64_t slab_length = slab_end - slab_begin;
+
+                    // What is in hand before spending another budget on this block. A block that
+                    // takes one read never gets here, so a small region still reports once.
+                    if (reads_done > 0) {
+                        if (auto handed = hand_over(false); !handed) {
+                            return handed.error();
+                        }
+                    }
+                    ++reads_done;
 
                     if (auto control = zarr::CheckReadControl(options, node); !control) {
                         return control.error();
@@ -612,41 +696,16 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                             }
                         }
                     }
+                    block_chunks_done +=
+                        run_chunks * ((slab_length + least_channels - 1) / least_channels);
                     slab_begin = slab_end;
                 }
             }
             row = band_end;
         }
 
-        // An extremum nothing contributed to is still its identity, which is the one value it must
-        // not be reported as. Finding those needs no extra bookkeeping: a finite pixel can never
-        // leave an infinity behind, so only the untouched entries are still infinite.
-        for (std::size_t r = 0; r < request.region_count; ++r) {
-            for (const int slot : {slot_min, slot_max}) {
-                if (slot < 0) {
-                    continue;
-                }
-                auto* base = accumulator.data() + (r * region_stride) +
-                             (static_cast<std::size_t>(slot) * statistic_stride);
-                for (std::size_t c = 0; c < block_length; ++c) {
-                    if (std::isinf(base[c])) {
-                        base[c] = std::numeric_limits<double>::quiet_NaN();
-                    }
-                }
-            }
-        }
-
-        SpectralBlock block;
-        block.first_channel = block_begin;
-        block.channel_count = block_length;
-        block.values = accumulator.data();
-        block.value_count = accumulator.size();
-        block.region_stride = region_stride;
-        block.statistic_stride = statistic_stride;
-        block.statistics = statistics.data();
-        block.statistic_count = statistic_count;
-        if (!sink(block)) {
-            return MakeError(ErrorCode::cancelled, "The spectral reduction was cancelled by its sink", node);
+        if (auto handed = hand_over(true); !handed) {
+            return handed.error();
         }
 
         block_begin = block_end;
