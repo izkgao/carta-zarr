@@ -77,6 +77,18 @@ public:
     Result<void> ReduceSpectral(const SpectralReduceRequest& request, const SpectralSink& sink,
                                 const ReadOptions& options) const;
 
+    // Bins every pixel of each plane over a fixed range, handing counts to the sink block by block.
+    //
+    // Separate from ReduceSpectral because a histogram is not one of the statistics that reduction
+    // accumulates, and because it needs none of that machinery: the region is always the whole
+    // plane, so there is nothing to index and no mask to consult.
+    //
+    // The image's pixel mask is applied when it has one, so a flagged pixel is not counted -- the
+    // same thing that happens to a NaN.
+    Result<void> ComputeHistogram(const HistogramRequest& request, const HistogramSink& sink) const;
+    Result<void> ComputeHistogram(const HistogramRequest& request, const HistogramSink& sink,
+                                  const ReadOptions& options) const;
+
     Result<std::vector<Beam>> ReadBeams() const;
 
 private:

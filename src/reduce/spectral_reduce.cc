@@ -7,6 +7,7 @@
 #include "spectral_reduce.h"
 
 #include "chunk_blocks.h"
+#include "reduce/axis_map.h"
 #include "zarr/pixel_reader.h"
 
 #include <algorithm>
@@ -32,46 +33,6 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
 }
 
 // Where each axis role sits in the logical axis order.
-struct AxisMap {
-    std::size_t x = 0;
-    std::size_t y = 0;
-    std::size_t spectral = 0;
-    bool has_polarization = false;
-    std::size_t polarization = 0;
-    bool has_time = false;
-    std::size_t time = 0;
-};
-
-Result<AxisMap> MapAxes(const ImageDescriptor& descriptor) {
-    AxisMap map;
-    bool has_x = false;
-    bool has_y = false;
-    bool has_spectral = false;
-    for (std::size_t i = 0; i < descriptor.axes.size(); ++i) {
-        const auto& axis = descriptor.axes.at(i);
-        switch (axis.role) {
-            case AxisRole::spatial_x: map.x = i; has_x = true; break;
-            case AxisRole::spatial_y: map.y = i; has_y = true; break;
-            case AxisRole::spectral: map.spectral = i; has_spectral = true; break;
-            case AxisRole::polarization: map.polarization = i; map.has_polarization = true; break;
-            case AxisRole::time: map.time = i; map.has_time = true; break;
-            case AxisRole::other:
-                // Taking index 0 of an axis nobody named would report a number for a plane the
-                // caller never asked about.
-                if (axis.length != 1) {
-                    return MakeError(ErrorCode::not_implemented,
-                                     "Axis '" + axis.name + "' has no known role and is not degenerate",
-                                     descriptor.id);
-                }
-                break;
-        }
-    }
-    if (!has_x || !has_y || !has_spectral) {
-        return MakeError(ErrorCode::not_implemented,
-                         "A spectral reduction needs both spatial axes and a spectral axis", descriptor.id);
-    }
-    return map;
-}
 
 // One region as the walk sees it: u is the spatial axis the store varies fastest and v is the other,
 // so that a plane arrives with u contiguous and never has to be transposed on the way in. A caller's

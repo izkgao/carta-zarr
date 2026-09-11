@@ -385,6 +385,45 @@ struct RegionMask {
     AxisRole run_axis = AxisRole::spatial_x;
 };
 
+// One plane histogram request: bin every pixel of each plane over a fixed range.
+//
+// The bounds and the arithmetic are float on purpose. The counts a caller already produces come
+// from `(val - min) / ((max - min) / bins)` evaluated in float and truncated, and an integer count
+// is the one thing here that can match exactly rather than to a tolerance -- doing the same
+// division in double would move pixels across bin edges and lose that.
+//
+// A pixel outside [lower, upper] is not counted, and neither is one that is not finite, which is
+// the same rule: NaN fails both comparisons.
+struct HistogramRequest {
+    Range spectral;
+    std::uint64_t polarization = 0;
+    std::uint64_t time = 0;
+    std::uint32_t bins = 0;
+    float lower = 0.0F;
+    float upper = 0.0F;
+    // How often to hand results back; zero lets the library choose, as in SpectralReduceRequest.
+    std::uint32_t emit_every_channels = 0;
+};
+
+// Bin counts for a run of planes. `counts` is [channel][bin], `bin_count` wide, and is valid only
+// inside the sink call.
+struct HistogramBlock {
+    std::uint64_t first_channel = 0;
+    std::uint64_t channel_count = 0;
+    const std::uint64_t* counts = nullptr;
+    std::size_t bin_count = 0;
+    // As in SpectralBlock: a block whose walk takes more than one read is handed over as it fills.
+    bool complete = true;
+    double completeness = 1.0;
+};
+
+using HistogramSink = std::function<bool(const HistogramBlock&)>;
+
+// The largest number of bins one histogram accepts. CARTA's automatic bin count is the square root
+// of the plane's pixel count, which is 32,768 for the largest image anyone has; this is a guard
+// against an uninitialised count, not a capacity estimate.
+inline constexpr std::uint32_t kMaxHistogramBins = 1u << 20;
+
 // The largest number of regions one reduction accepts.
 //
 // This is a structural guard, not a capacity estimate: the largest legitimate request is one box

@@ -7,6 +7,7 @@
 #include "carta-zarr/carta_zarr.h"
 
 #include "chunk_blocks.h"
+#include "reduce/plane_histogram.h"
 #include "reduce/spectral_reduce.h"
 #include "schema/profile.h"
 #include "store.h"
@@ -388,6 +389,18 @@ Result<void> Image::ReduceSpectral(const SpectralReduceRequest& request, const S
         return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
     }
     return internal::ReduceSpectral(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options);
+}
+
+Result<void> Image::ComputeHistogram(const HistogramRequest& request, const HistogramSink& sink) const {
+    return ComputeHistogram(request, sink, ReadOptions{});
+}
+
+Result<void> Image::ComputeHistogram(const HistogramRequest& request, const HistogramSink& sink,
+                                     const ReadOptions& options) const {
+    if (!_impl || !_impl->store) {
+        return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
+    }
+    return internal::ComputeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options);
 }
 
 Result<std::vector<Beam>> Image::ReadBeams() const {

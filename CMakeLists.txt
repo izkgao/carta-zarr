@@ -46,6 +46,7 @@ endif()
 
 add_library(carta_zarr SHARED
     src/carta_zarr.cc
+    src/reduce/plane_histogram.cc
     src/reduce/spectral_reduce.cc
     src/schema/profile.cc
     src/schema/xradio/probe_report.cc
@@ -253,6 +254,14 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         CARTA_ZARR_PIXEL_FIXTURE="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels"
         CARTA_ZARR_PIXEL_FIXTURE_L_FASTEST="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels_l_fastest")
     add_test(NAME carta-zarr-spectral-reduce COMMAND carta_zarr_spectral_reduce_tests)
+
+    add_executable(carta_zarr_histogram_tests tests/histogram_test.cc)
+    target_link_libraries(carta_zarr_histogram_tests PRIVATE CARTA::zarr)
+    target_compile_features(carta_zarr_histogram_tests PRIVATE cxx_std_17)
+    target_compile_definitions(carta_zarr_histogram_tests PRIVATE
+        CARTA_ZARR_PIXEL_FIXTURE="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels"
+        CARTA_ZARR_PIXEL_FIXTURE_L_FASTEST="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels_l_fastest")
+    add_test(NAME carta-zarr-histogram COMMAND carta_zarr_histogram_tests)
 
     if(CARTA_ZARR_BUILD_PACKAGE_TEST)
         add_test(
