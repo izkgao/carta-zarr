@@ -143,7 +143,7 @@ public:
         return nodes;
     }
 
-    Result<std::filesystem::path> ArrayPath(std::string_view node) const override {
+    Result<std::filesystem::path> ArrayDirectory(std::string_view node) const override {
         const std::filesystem::path relative(node);
         if (relative.empty() || relative.is_absolute() || relative.has_root_name() ||
             node.find('\\') != std::string_view::npos) {

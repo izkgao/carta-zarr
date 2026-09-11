@@ -50,7 +50,7 @@ public:
         return nodes;
     }
 
-    Result<std::filesystem::path> ArrayPath(std::string_view node) const override {
+    Result<std::filesystem::path> ArrayDirectory(std::string_view node) const override {
         return Error{ErrorCode::unsupported_transport, "An in-memory transport holds no array data", std::string(node)};
     }
 

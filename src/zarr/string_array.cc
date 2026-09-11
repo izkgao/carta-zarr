@@ -393,13 +393,13 @@ std::vector<std::uint8_t> DecodeStringChunk(std::vector<std::uint8_t> bytes, con
 
 }  // namespace
 
-Result<std::vector<std::string>> ReadFixedLengthUtf32StringArray(const std::filesystem::path& array_dir,
+Result<std::vector<std::string>> ReadFixedLengthUtf32StringArray(const std::filesystem::path& array_directory,
                                                                  const ArrayMetadata& array_metadata,
                                                                  const nlohmann::json& metadata,
                                                                  std::string_view node) {
     try {
         const StringArrayLayout layout = ParseStringArrayLayout(array_metadata);
-        const std::filesystem::path chunk_path = GetStringChunkPath(array_dir, metadata);
+        const std::filesystem::path chunk_path = GetStringChunkPath(array_directory, metadata);
 
         // Missing chunk: all elements take the (empty) fill value.
         std::error_code error;

@@ -58,10 +58,10 @@ struct StoreCaches {
 class StoreContext;
 using StoreContextPtr = std::shared_ptr<const StoreContext>;
 
-// A Store interprets a Zarr hierarchy over a Transport. It owns everything that turns bytes into
-// meaning -- node path validation, JSON parsing, consolidated metadata, array metadata, storage
-// layout, and the caches -- so that every Transport is interpreted identically. Nothing above this
-// module learns where the bytes came from.
+// A Store is the Dataset-scoped storage session that interprets a Zarr hierarchy over a Transport.
+// It owns everything that turns bytes into meaning -- node path validation, JSON parsing,
+// consolidated metadata, array metadata, storage layout, data locations, and the caches -- so that
+// every read uses one consistent session. Nothing above this module learns where the bytes came from.
 class Store {
 public:
     Store(TransportPtr transport, nlohmann::json root_attributes,
@@ -90,6 +90,7 @@ public:
                                     std::uint8_t* destination, std::size_t destination_elements) const;
 
 private:
+    Result<std::filesystem::path> ResolveArrayDirectory(std::string_view node) const;
     Result<std::vector<double>> ReadNumericArrayUncached(std::string_view node) const;
     Result<std::vector<std::string>> ReadStringArray1DUncached(std::string_view node) const;
 

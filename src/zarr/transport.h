@@ -41,10 +41,10 @@ public:
     // carries no consolidated metadata.
     virtual Result<std::vector<std::string>> ListNodes() const = 0;
 
-    // Where a node's array data lives, for the coordinate value reads that go through TensorStore.
-    // A transport holding no filesystem data reports unsupported_transport, so those reads fail with
-    // a reason rather than obscurely; an unusable node name reports invalid_argument.
-    virtual Result<std::filesystem::path> ArrayPath(std::string_view node) const = 0;
+    // Where a node's array directory lives. The current storage session is local-filesystem only;
+    // a transport holding no filesystem data reports unsupported_transport rather than pretending
+    // that TensorStore or the string decoder can read it.
+    virtual Result<std::filesystem::path> ArrayDirectory(std::string_view node) const = 0;
 };
 
 using TransportPtr = std::shared_ptr<const Transport>;

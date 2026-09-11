@@ -42,12 +42,12 @@ std::uint64_t SelectionElementCount(const PixelSelection& selection);
  * Missing chunks resolve to the array's fill value, which is what a Zarr reader is required to do
  * and is the only definition of "absent pixel" the format offers.
  */
-Result<void> ReadFloat32(const std::filesystem::path& array_path, const StoreContextPtr& context,
+Result<void> ReadFloat32(const std::filesystem::path& array_directory, const StoreContextPtr& context,
                          std::string_view node, const PixelSelection& selection, float* destination,
                          std::size_t destination_elements);
 
 // Read a boolean array as one byte per element, true meaning a good pixel.
-Result<void> ReadMaskBytes(const std::filesystem::path& array_path, const StoreContextPtr& context,
+Result<void> ReadMaskBytes(const std::filesystem::path& array_directory, const StoreContextPtr& context,
                            std::string_view node, const PixelSelection& selection, std::uint8_t* destination,
                            std::size_t destination_elements);
 

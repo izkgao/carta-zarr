@@ -28,7 +28,7 @@ namespace carta::zarr::internal::zarr {
  * any number of crc32c codecs (checksums are verified). This covers the layouts produced by XRADIO
  * for coordinate label arrays. A missing chunk yields the empty fill value for every element.
  */
-Result<std::vector<std::string>> ReadFixedLengthUtf32StringArray(const std::filesystem::path& array_dir,
+Result<std::vector<std::string>> ReadFixedLengthUtf32StringArray(const std::filesystem::path& array_directory,
                                                                  const ArrayMetadata& array_metadata,
                                                                  const nlohmann::json& metadata, std::string_view node);
 

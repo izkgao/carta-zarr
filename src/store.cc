@@ -363,7 +363,7 @@ Result<std::vector<double>> Store::ReadNumericArray(std::string_view node) const
 }
 
 Result<std::vector<double>> Store::ReadNumericArrayUncached(std::string_view node) const {
-    auto array_path = _transport->ArrayPath(node);
+    auto array_path = ResolveArrayDirectory(node);
     if (!array_path) {
         return array_path.error();
     }
@@ -376,22 +376,18 @@ Result<std::vector<double>> Store::ReadNumericArrayUncached(std::string_view nod
     }
 }
 
-namespace {
-
-Result<std::filesystem::path> ResolveArrayPath(const TransportPtr& transport, std::string_view node) {
-    auto array_path = transport->ArrayPath(node);
+Result<std::filesystem::path> Store::ResolveArrayDirectory(std::string_view node) const {
+    auto array_path = _transport->ArrayDirectory(node);
     if (!array_path) {
         return array_path.error();
     }
     return std::filesystem::weakly_canonical(std::filesystem::absolute(array_path.value()));
 }
 
-}  // namespace
-
 Result<void> Store::ReadPixelsFloat32(std::string_view node, const zarr::PixelSelection& selection,
                                       float* destination, std::size_t destination_elements) const {
     try {
-        auto target_path = ResolveArrayPath(_transport, node);
+        auto target_path = ResolveArrayDirectory(node);
         if (!target_path) {
             return target_path.error();
         }
@@ -405,7 +401,7 @@ Result<void> Store::ReadPixelsFloat32(std::string_view node, const zarr::PixelSe
 Result<void> Store::ReadPixelMaskBytes(std::string_view node, const zarr::PixelSelection& selection,
                                        std::uint8_t* destination, std::size_t destination_elements) const {
     try {
-        auto target_path = ResolveArrayPath(_transport, node);
+        auto target_path = ResolveArrayDirectory(node);
         if (!target_path) {
             return target_path.error();
         }
@@ -430,7 +426,7 @@ Result<std::vector<std::string>> Store::ReadStringArray1DUncached(std::string_vi
     if (!array_meta_res) {
         return array_meta_res.error();
     }
-    auto array_path = _transport->ArrayPath(node);
+    auto array_path = ResolveArrayDirectory(node);
     if (!array_path) {
         return array_path.error();
     }

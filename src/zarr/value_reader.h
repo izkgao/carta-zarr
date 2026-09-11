@@ -22,7 +22,8 @@ namespace carta::zarr::internal::zarr {
  * needs metadata but never coordinate values -- a schema profile and its tests -- can link without
  * it. A null context uses TensorStore's own default resources.
  */
-Result<std::vector<double>> ReadNumericValues(const std::filesystem::path& array_path, const StoreContextPtr& context,
+Result<std::vector<double>> ReadNumericValues(const std::filesystem::path& array_directory,
+                                              const StoreContextPtr& context,
                                               std::string_view node);
 
 }  // namespace carta::zarr::internal::zarr

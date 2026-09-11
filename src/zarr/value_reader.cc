@@ -29,12 +29,13 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
 
 }  // namespace
 
-Result<std::vector<double>> ReadNumericValues(const std::filesystem::path& array_path, const StoreContextPtr& context,
+Result<std::vector<double>> ReadNumericValues(const std::filesystem::path& array_directory,
+                                              const StoreContextPtr& context,
                                               std::string_view node) {
     try {
         auto spec_result = tensorstore::Spec::FromJson({
             {"driver", "zarr3"},
-            {"kvstore", {{"driver", "file"}, {"path", array_path.string()}}},
+            {"kvstore", {{"driver", "file"}, {"path", array_directory.string()}}},
         });
         if (!spec_result.ok()) {
             return MakeError(ErrorCode::io_error,
