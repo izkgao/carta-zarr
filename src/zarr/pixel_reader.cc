@@ -32,9 +32,26 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
     return Error{code, std::move(message), std::move(node_path)};
 }
 
+bool MatchesDataType(std::string_view expected, tensorstore::DataType actual) {
+    if (expected == "bool") return actual == tensorstore::dtype_v<bool>;
+    if (expected == "int8") return actual == tensorstore::dtype_v<std::int8_t>;
+    if (expected == "uint8") return actual == tensorstore::dtype_v<std::uint8_t>;
+    if (expected == "int16") return actual == tensorstore::dtype_v<std::int16_t>;
+    if (expected == "uint16") return actual == tensorstore::dtype_v<std::uint16_t>;
+    if (expected == "int32") return actual == tensorstore::dtype_v<std::int32_t>;
+    if (expected == "uint32") return actual == tensorstore::dtype_v<std::uint32_t>;
+    if (expected == "int64") return actual == tensorstore::dtype_v<std::int64_t>;
+    if (expected == "uint64") return actual == tensorstore::dtype_v<std::uint64_t>;
+    if (expected == "float16") return actual == tensorstore::dtype_v<tensorstore::dtypes::float16_t>;
+    if (expected == "float32") return actual == tensorstore::dtype_v<float>;
+    if (expected == "float64") return actual == tensorstore::dtype_v<double>;
+    return false;
+}
+
 bool SelectionIsWellFormed(const PixelSelection& selection) {
     const auto rank = selection.start.size();
     if (rank == 0 || selection.count.size() != rank || selection.stride.size() != rank || selection.shape.size() != rank ||
+        selection.dimension_names.size() != rank ||
         selection.logical_to_stored.size() != rank) {
         return false;
     }
@@ -51,7 +68,8 @@ bool SelectionIsWellFormed(const PixelSelection& selection) {
 
 template <typename Element>
 Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContextPtr& context,
-                      std::string_view node, const PixelSelection& selection, tensorstore::DataType target_dtype,
+                      std::string_view node, std::string_view expected_data_type, const PixelSelection& selection,
+                      tensorstore::DataType target_dtype,
                       Element* destination, std::size_t destination_elements, const ReadOptions& options) {
     if (destination == nullptr) {
         return MakeError(ErrorCode::invalid_argument, "Destination buffer is null", std::string(node));
@@ -99,13 +117,29 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
                              std::string(node));
         }
         for (std::size_t axis = 0; axis < rank; ++axis) {
-            if (actual_shape.at(axis) != static_cast<tensorstore::Index>(selection.shape.at(axis))) {
+            if (actual_shape[axis] != static_cast<tensorstore::Index>(selection.shape.at(axis))) {
                 return MakeError(ErrorCode::invalid_metadata,
                                  "Array shape differs between canonical metadata and the array store",
                                  std::string(node));
             }
         }
-
+        const auto actual_dimension_names = store.domain().labels();
+        if (actual_dimension_names.size() != rank) {
+            return MakeError(ErrorCode::invalid_metadata, "Array dimension names differ between metadata sources",
+                             std::string(node));
+        }
+        for (std::size_t axis = 0; axis < rank; ++axis) {
+            if (actual_dimension_names[axis] != selection.dimension_names.at(axis)) {
+                return MakeError(ErrorCode::invalid_metadata,
+                                 "Array dimension names differ between canonical metadata and the array store",
+                                 std::string(node));
+            }
+        }
+        if (!MatchesDataType(expected_data_type, store.dtype())) {
+            return MakeError(ErrorCode::invalid_metadata,
+                             "Array data type differs between canonical metadata and the array store",
+                             std::string(node));
+        }
         std::vector<tensorstore::Index> start(rank);
         std::vector<tensorstore::Index> count(rank);
         std::vector<tensorstore::Index> stride(rank);
@@ -190,16 +224,16 @@ std::uint64_t SelectionElementCount(const PixelSelection& selection) {
 }
 
 Result<void> ReadFloat32(const std::filesystem::path& array_path, const StoreContextPtr& context,
-                         std::string_view node, const PixelSelection& selection, float* destination,
+                         std::string_view node, std::string_view expected_data_type, const PixelSelection& selection, float* destination,
                          std::size_t destination_elements, const ReadOptions& options) {
-    return ReadInto(array_path, context, node, selection, tensorstore::dtype_v<float>, destination,
+    return ReadInto(array_path, context, node, expected_data_type, selection, tensorstore::dtype_v<float>, destination,
                     destination_elements, options);
 }
 
 Result<void> ReadMaskBytes(const std::filesystem::path& array_path, const StoreContextPtr& context,
-                           std::string_view node, const PixelSelection& selection, std::uint8_t* destination,
+                           std::string_view node, std::string_view expected_data_type, const PixelSelection& selection, std::uint8_t* destination,
                            std::size_t destination_elements, const ReadOptions& options) {
-    return ReadInto(array_path, context, node, selection, tensorstore::dtype_v<bool>,
+    return ReadInto(array_path, context, node, expected_data_type, selection, tensorstore::dtype_v<bool>,
                     reinterpret_cast<bool*>(destination), destination_elements, options);
 }
 

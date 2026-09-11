@@ -6,10 +6,21 @@
 
 #include "zarr/pixel_reader.h"
 
+#include <chrono>
 #include <limits>
 #include <string>
 
 namespace carta::zarr::internal::zarr {
+
+Result<void> CheckReadControl(const ReadOptions& options, std::string_view node) {
+    if (options.cancellation_requested && options.cancellation_requested()) {
+        return Error{ErrorCode::cancelled, "Pixel read was cancelled", std::string(node)};
+    }
+    if (std::chrono::steady_clock::now() >= options.deadline) {
+        return Error{ErrorCode::cancelled, "Pixel read deadline expired", std::string(node)};
+    }
+    return {};
+}
 
 // Companion to value_reader_stub.cc: the schema profile tests link without TensorStore. The
 // in-memory transport holds no array data, so a pixel read has no answer to give and
@@ -31,12 +42,12 @@ std::uint64_t SelectionElementCount(const PixelSelection& selection) {
 }
 
 Result<void> ReadFloat32(const std::filesystem::path&, const StoreContextPtr&, std::string_view node,
-                         const PixelSelection&, float*, std::size_t, const ReadOptions&) {
+                         std::string_view, const PixelSelection&, float*, std::size_t, const ReadOptions&) {
     return Error{ErrorCode::unsupported_transport, "This build reads no pixels", std::string(node)};
 }
 
 Result<void> ReadMaskBytes(const std::filesystem::path&, const StoreContextPtr&, std::string_view node,
-                           const PixelSelection&, std::uint8_t*, std::size_t, const ReadOptions&) {
+                           std::string_view, const PixelSelection&, std::uint8_t*, std::size_t, const ReadOptions&) {
     return Error{ErrorCode::unsupported_transport, "This build reads no pixels", std::string(node)};
 }
 

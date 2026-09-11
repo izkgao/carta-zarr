@@ -57,7 +57,7 @@ Result<ImageDiscovery> SchemaProfile::Discover(const Store& store) const {
 }
 
 Result<void> SchemaProfile::RequireOpenable(const Store& store, std::string_view image_id) const {
-    auto discovery = _entry->discover(store);
+    auto discovery = Discover(store);
     if (!discovery) {
         return discovery.error();
     }

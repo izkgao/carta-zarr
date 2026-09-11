@@ -33,6 +33,8 @@ struct PixelSelection {
     std::vector<std::uint64_t> stride;
     // The full array shape from the Store's canonical metadata, in stored axis order.
     std::vector<std::uint64_t> shape;
+    // The canonical dimension names from the Store's metadata, in stored axis order.
+    std::vector<std::string> dimension_names;
     // logical_to_stored[i] is the stored dimension that logical axis i names. The destination is
     // written densely in logical order with axis 0 fastest-varying.
     std::vector<std::size_t> logical_to_stored;
@@ -48,12 +50,12 @@ std::uint64_t SelectionElementCount(const PixelSelection& selection);
  * and is the only definition of "absent pixel" the format offers.
  */
 Result<void> ReadFloat32(const std::filesystem::path& array_directory, const StoreContextPtr& context,
-                         std::string_view node, const PixelSelection& selection, float* destination,
+                         std::string_view node, std::string_view expected_data_type, const PixelSelection& selection, float* destination,
                          std::size_t destination_elements, const ReadOptions& options);
 
 // Read a boolean array as one byte per element, true meaning a good pixel.
 Result<void> ReadMaskBytes(const std::filesystem::path& array_directory, const StoreContextPtr& context,
-                           std::string_view node, const PixelSelection& selection, std::uint8_t* destination,
+                           std::string_view node, std::string_view expected_data_type, const PixelSelection& selection, std::uint8_t* destination,
                            std::size_t destination_elements, const ReadOptions& options);
 
 }  // namespace carta::zarr::internal::zarr

@@ -499,7 +499,7 @@ Result<SchemaProbeResult> ProbeImage(const Store& store) {
     ProbeReport report(store, "image dataset");
 
     const auto& root_attributes = store.RootAttributes();
-    auto discovery = DiscoverImages(store);
+    auto discovery = store.CachedImageDiscovery(kXradioImageSchema, [&] { return DiscoverImages(store); });
     if (!discovery) {
         return discovery.error();
     }
