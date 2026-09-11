@@ -44,7 +44,7 @@ Checks: >-
 WarningsAsErrors: ''
 
 # Filter: only check project headers, ignore system & third-party libraries
-HeaderFilterRegex: '(include/carta-zarr/.*|src/.*)'
+HeaderFilterRegex: 'carta-zarr/(include/carta-zarr/.*|src/.*)'
 
 # Use .clang-format for auto-fixes
 FormatStyle: file

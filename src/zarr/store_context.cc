@@ -53,14 +53,18 @@ Result<tensorstore::TensorStore<>> StoreContext::OpenArray(const std::filesystem
 Result<StoreContextPtr> MakeStoreContext(const OpenOptions& options) {
     nlohmann::json spec = nlohmann::json::object();
     if (options.cache_bytes > 0) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         spec["cache_pool"] = {{"total_bytes_limit", options.cache_bytes}};
     } else if (options.disable_cache) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         spec["cache_pool"] = {{"total_bytes_limit", 0}};
     }
     if (options.io_threads > 0) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         spec["file_io_concurrency"] = {{"limit", options.io_threads}};
     }
     if (options.decode_threads > 0) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         spec["data_copy_concurrency"] = {{"limit", options.decode_threads}};
     }
 
