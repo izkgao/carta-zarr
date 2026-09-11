@@ -353,12 +353,13 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
     const auto runs_per_row = BuildColumnRuns(buckets);
 
     const bool apply_mask = options.apply_pixel_mask && descriptor.has_pixel_mask;
-    const std::size_t slab_budget_bytes =
-        options.temporary_memory_limit_bytes != 0 ? options.temporary_memory_limit_bytes : kDecodedBytesPerRead;
     // Budget the chunk data a slab decodes, not the pixels it keeps. A one-pixel region asks for
     // almost nothing and still decodes an entire chunk per chunk it touches, so sizing by the
     // region's own area would let a cursor-sized request pull an unbounded amount through.
     const std::uint64_t chunk_bytes = DecodedChunkBytes(descriptor, geometry) * (apply_mask ? 2 : 1);
+    const std::size_t slab_budget_bytes = options.temporary_memory_limit_bytes != 0
+                                              ? options.temporary_memory_limit_bytes
+                                              : DefaultReadBytes(chunk_bytes);
     // The smallest slab that still decodes each spectral chunk once. Reading fewer channels than
     // this would decode a chunk and use part of it, then decode it again for the rest.
     const std::uint64_t least_channels = ((chunk_depth + spectral.stride - 1) / spectral.stride);

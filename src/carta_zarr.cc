@@ -266,8 +266,10 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
             slab_stride *= request.axes.at(i).count;
         }
         slab_chunk = axis < _impl->geometry.chunk_shape.size() ? _impl->geometry.chunk_shape.at(axis) : 0;
-        const auto budget = options.temporary_memory_limit_bytes != 0 ? options.temporary_memory_limit_bytes
-                                                                       : internal::kDecodedBytesPerRead;
+        const auto budget =
+            options.temporary_memory_limit_bytes != 0
+                ? options.temporary_memory_limit_bytes
+                : internal::DefaultReadBytes(internal::DecodedChunkBytes(_impl->descriptor, _impl->geometry));
         slab_step = ElementsPerPiece(_impl->descriptor, request, _impl->geometry, axis, budget);
     }
 

@@ -16,21 +16,47 @@ namespace carta::zarr::internal {
 
 // How much decompressed chunk data one storage request should pull through.
 //
-// Two things set this, and they pull in opposite directions. Below about 16 MiB a request stops
-// holding enough chunks to decode in parallel: measured by reading one cursor column of 1 MiB
-// chunks in pieces, one chunk per request is 7x slower than one unsplit read and four chunks is
-// still 2x, not because a request costs anything but because a request holding one chunk has
-// nothing to spread over the decode threads. Above about 100 MiB a piece takes longer than the
-// interval a caller wants to report progress on, which is the reason for splitting at all.
+// Two things set this, and they pull in opposite directions. A request that is too small stops
+// holding enough chunks to decode in parallel -- see kMinChunksPerRead below, which is that floor
+// in the unit it is really in. Above about 100 MiB a piece takes longer than the interval a caller
+// wants to report progress on, which is the reason for splitting at all.
 //
-// 64 MiB sits between them with room on both sides: four times the floor, and about a third of a
-// second of decoding at the rates these images decompress at.
+// 64 MiB sits between them for the images these were measured on: sixteen chunks of a 4 MiB one,
+// and about a third of a second of decoding at the rates they decompress at. DefaultReadBytes
+// raises it when a chunk is large enough that this many bytes would not buy enough chunks.
 //
 // This is a byte budget rather than a chunk count because chunk sizes are not comparable across
-// real images -- the four cubes measured here span 0.12 MiB to 48 MiB per chunk, a factor of 400.
-// A fixed count of 64 would mean 8 MiB pieces on one of them and 3 GiB pieces on another, and the
-// one with the largest chunks would end up never splitting at all.
+// real images -- the cubes measured here span 0.12 MiB to 480 MiB per decoded chunk, a factor of
+// nearly four thousand. A fixed count of 64 would mean 8 MiB pieces on one of them and 30 GiB
+// pieces on another, and the one with the largest chunks would end up never splitting at all.
 inline constexpr std::size_t kDecodedBytesPerRead = 64u << 20;
+
+// The chunks one request should cover, below which the decode pool runs short of work.
+//
+// This is the same floor the budget above describes, stated in the unit it is actually in. Holding
+// everything else fixed and varying only the decode concurrency settles it: on a 1 MiB chunk image
+// a whole-plane profile took 97.8 ms at 64 chunks per request, 109.2 at 16, 119.8 at 8, 152.5 at 4
+// and 462.2 at 1 -- while the same sweep with the pool limited to one thread was flat at 410-459 ms
+// throughout. A request holding one chunk performs exactly as if there were no pool, because there
+// is nothing to spread over it.
+//
+// So a budget in bytes alone is not enough: 64 MiB is sixteen chunks of a 4 MiB image and four of a
+// 16 MiB one, and XRADIO writes both -- 512x512x4 is 4 MiB with one polarization and 16 MiB with
+// four of them in the chunk. Eight is where the curve is within a quarter of flat on a five-core
+// machine. A machine with more decode threads wants more, so this is a floor, not a target.
+inline constexpr std::uint64_t kMinChunksPerRead = 8;
+
+// The ceiling on raising the budget to reach that floor. An image whose chunk is already a large
+// fraction of what a request should hold cannot be given eight of them, and past this both reasons
+// for splitting at all -- bounded memory, and a piece short enough to report on -- are lost anyway.
+inline constexpr std::size_t kMaxDecodedBytesPerRead = 256u << 20;
+
+// What one request may decode when the caller has not said otherwise.
+inline std::uint64_t DefaultReadBytes(std::uint64_t chunk_bytes) {
+    const std::uint64_t wanted = std::max<std::uint64_t>(1, chunk_bytes) * kMinChunksPerRead;
+    return std::min<std::uint64_t>(kMaxDecodedBytesPerRead,
+                                   std::max<std::uint64_t>(kDecodedBytesPerRead, wanted));
+}
 
 // Bytes one chunk of this image decompresses to.
 inline std::uint64_t DecodedChunkBytes(const ImageDescriptor& descriptor, const ChunkGeometry& geometry) {

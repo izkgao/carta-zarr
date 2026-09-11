@@ -215,6 +215,13 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME carta-zarr-linear-axis COMMAND carta_zarr_linear_axis_tests)
 
+    add_executable(carta_zarr_chunk_blocks_tests tests/chunk_blocks_test.cc)
+    target_compile_features(carta_zarr_chunk_blocks_tests PRIVATE cxx_std_17)
+    target_include_directories(carta_zarr_chunk_blocks_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME carta-zarr-chunk-blocks COMMAND carta_zarr_chunk_blocks_tests)
+
     # Conformance runs against a store XRADIO itself produced, so that a bump of the pinned XRADIO
     # version reports which of this library's assumptions it broke.
     add_executable(carta_zarr_conformance_tests tests/conformance_test.cc)
