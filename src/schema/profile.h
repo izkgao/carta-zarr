@@ -15,8 +15,8 @@
 namespace carta::zarr::internal {
 
 struct ImageDiscovery {
-    std::vector<std::string> image_ids;
-    std::vector<std::string> openable_image_ids;
+    std::vector<ImageEntry> images;
+    std::optional<std::string> default_image_id;
     std::vector<Diagnostic> diagnostics;
 };
 
@@ -43,6 +43,9 @@ public:
 
     // Both of these first ask whether the profile will open this image at all.
     Result<ImageDescriptor> Describe(const Store& store, std::string_view image_id) const;
+    // The caller has already checked the ImageDiscovery result for this store. This avoids a
+    // second discovery pass when Dataset::OpenImage follows a cached dataset listing.
+    Result<ImageDescriptor> DescribeVerified(const Store& store, std::string_view image_id) const;
     Result<std::vector<Beam>> ReadBeams(const Store& store, std::string_view image_id) const;
 
 private:

@@ -50,6 +50,25 @@ bool HasDiagnostic(const carta::zarr::SchemaProbeResult& probe, const std::strin
     return HasDiagnostic(probe.diagnostics, code);
 }
 
+std::vector<std::string> ImageIds(const std::vector<carta::zarr::ImageEntry>& images) {
+    std::vector<std::string> ids;
+    ids.reserve(images.size());
+    for (const auto& image : images) {
+        ids.push_back(image.id);
+    }
+    return ids;
+}
+
+std::vector<std::string> ReadableImageIds(const std::vector<carta::zarr::ImageEntry>& images) {
+    std::vector<std::string> ids;
+    for (const auto& image : images) {
+        if (image.readable) {
+            ids.push_back(image.id);
+        }
+    }
+    return ids;
+}
+
 std::string RootGroup(bool coordinate_system = true) {
     std::string attributes;
     if (coordinate_system) {
@@ -229,10 +248,11 @@ void TestDiscoveryClassifiesVariables() {
     auto discovery = XradioProfile().Discover(store.value());
     Require(static_cast<bool>(discovery), "profile discovery reported an error");
 
-    Require(discovery.value().image_ids == std::vector<std::string>{"SKY", "MODEL", "APERTURE", "COMPLEX"},
+    Require(ImageIds(discovery.value().images) == std::vector<std::string>{"SKY", "MODEL", "APERTURE", "COMPLEX"},
             "discovery did not enumerate the images in display order");
-    Require(discovery.value().openable_image_ids == std::vector<std::string>{"SKY", "MODEL"},
+    Require(ReadableImageIds(discovery.value().images) == std::vector<std::string>{"SKY", "MODEL"},
             "discovery did not restrict the openable images to real sky-plane variables");
+    Require(discovery.value().default_image_id == "SKY", "discovery did not select the default readable image");
     Require(HasDiagnostic(discovery.value().diagnostics, "unsupported_coordinate_plane"),
             "the aperture-plane variable produced no diagnostic");
     Require(HasDiagnostic(discovery.value().diagnostics, "unsupported_data_type"),
@@ -261,6 +281,25 @@ void TestOpenableGate() {
     Require(!absent && absent.error().code == ErrorCode::not_found, "an absent variable was not reported as missing");
 }
 
+void TestDefaultImageSkipsUnreadablePreferredImage() {
+    auto nodes = CompleteStore();
+    nodes["SKY"] = SkyArray("complex64");
+    nodes["RESIDUAL"] = SkyArray();
+
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "the default-image store failed to open");
+    auto discovery = XradioProfile().Discover(store.value());
+    Require(static_cast<bool>(discovery), "default-image discovery reported an error");
+    Require(discovery.value().default_image_id == "RESIDUAL",
+            "discovery selected an unreadable preferred image as the default");
+
+    const auto sky = std::find_if(discovery.value().images.begin(), discovery.value().images.end(),
+                                  [](const auto& image) { return image.id == "SKY"; });
+    Require(sky != discovery.value().images.end() && !sky->readable &&
+                HasDiagnostic(sky->diagnostics, "unsupported_data_type"),
+            "the unreadable image did not carry its capability diagnostic");
+}
+
 // Regression for discovery through consolidated metadata. It used to stat the filesystem directly,
 // which cannot see consolidated metadata.
 void TestConsolidatedMetadataDiscovery() {
@@ -274,7 +313,7 @@ void TestConsolidatedMetadataDiscovery() {
     Require(static_cast<bool>(store), "the consolidated store failed to open");
     auto discovery = XradioProfile().Discover(store.value());
     Require(static_cast<bool>(discovery), "discovery over consolidated metadata reported an error");
-    Require(discovery.value().openable_image_ids == std::vector<std::string>{"SKY"},
+    Require(ReadableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
             "discovery did not find SKY through consolidated metadata");
 }
 
@@ -331,6 +370,7 @@ int main() {
         TestIncompleteImageIsNotMatch();
         TestDiscoveryClassifiesVariables();
         TestOpenableGate();
+        TestDefaultImageSkipsUnreadablePreferredImage();
         TestConsolidatedMetadataDiscovery();
         TestStoreRejections();
         std::cout << "carta-zarr schema profile tests passed\n";

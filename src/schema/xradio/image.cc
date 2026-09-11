@@ -463,29 +463,35 @@ Result<::carta::zarr::internal::ImageDiscovery> DiscoverImages(const Store& stor
         }
 
         if (HasAllAxes(array, kSkyAxes)) {
-            result.image_ids.push_back(node);
             if (zarr_metadata::IsRealDataType(array.data_type)) {
-                result.openable_image_ids.push_back(node);
+                result.images.push_back(ImageEntry{node, true, {}});
             } else {
-                result.diagnostics.push_back(
-                    Diagnostic{"unsupported_data_type", "Complex sky-plane variables are not openable", node});
+                const Diagnostic diagnostic{"unsupported_data_type", "Complex sky-plane variables are not openable",
+                                            node};
+                result.images.push_back(ImageEntry{node, false, {diagnostic}});
+                result.diagnostics.push_back(diagnostic);
             }
         } else if (HasAllAxes(array, kApertureAxes)) {
-            result.image_ids.push_back(node);
-            result.diagnostics.push_back(
-                Diagnostic{"unsupported_coordinate_plane", "Aperture-plane variables are not openable", node});
+            const Diagnostic diagnostic{"unsupported_coordinate_plane", "Aperture-plane variables are not openable",
+                                        node};
+            result.images.push_back(ImageEntry{node, false, {diagnostic}});
+            result.diagnostics.push_back(diagnostic);
         }
     }
 
-    const auto sort_images = [](std::vector<std::string>& images) {
+    const auto sort_images = [](std::vector<ImageEntry>& images) {
         std::sort(images.begin(), images.end(), [](const auto& left, const auto& right) {
-            const int left_rank = KnownImageRank(left);
-            const int right_rank = KnownImageRank(right);
-            return left_rank == right_rank ? left < right : left_rank < right_rank;
+            const int left_rank = KnownImageRank(left.id);
+            const int right_rank = KnownImageRank(right.id);
+            return left_rank == right_rank ? left.id < right.id : left_rank < right_rank;
         });
     };
-    sort_images(result.image_ids);
-    sort_images(result.openable_image_ids);
+    sort_images(result.images);
+    const auto readable = std::find_if(result.images.begin(), result.images.end(),
+                                       [](const ImageEntry& image) { return image.readable; });
+    if (readable != result.images.end()) {
+        result.default_image_id = readable->id;
+    }
     return result;
 }
 
@@ -498,7 +504,7 @@ Result<SchemaProbeResult> ProbeImage(const Store& store) {
         return discovery.error();
     }
     report.SetDiagnostics(discovery.value().diagnostics);
-    if (discovery.value().openable_image_ids.empty()) {
+    if (!discovery.value().default_image_id) {
         // A valid Zarr store without an image that this profile can open is a non-match. The
         // discovery diagnostics still explain why variables such as complex or aperture-plane
         // arrays were not openable.
@@ -506,7 +512,7 @@ Result<SchemaProbeResult> ProbeImage(const Store& store) {
     }
 
     // Once discovery found an openable image, validate the metadata needed by the image reader.
-    const auto& first_image = discovery.value().openable_image_ids.front();
+    const auto& first_image = *discovery.value().default_image_id;
     auto array_result = store.ReadArrayMetadata(first_image);
     if (report.RequireArrayMetadata(array_result, first_image)) {
         RequirePresentCoordinates(report, array_result.value());

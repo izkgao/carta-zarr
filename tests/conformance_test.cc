@@ -54,7 +54,9 @@ carta::zarr::Image OpenSky() {
 
     // XRADIO writes right_ascension, declination and velocity as coordinates alongside SKY. Only
     // SKY carries the full sky axis set, so only SKY is an image.
-    Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"SKY"},
+    Require(dataset.value().descriptor().images.size() == 1 &&
+                dataset.value().descriptor().images.front().id == "SKY" &&
+                dataset.value().descriptor().images.front().readable,
             "discovery did not report SKY as the only image of XRADIO's own output");
     auto image = dataset.value().OpenImage("SKY");
     Require(static_cast<bool>(image), "SKY could not be opened");

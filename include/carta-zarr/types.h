@@ -49,13 +49,20 @@ struct SchemaProbeResult {
     std::vector<Diagnostic> diagnostics;
 };
 
+struct ImageEntry {
+    std::string id;
+    bool readable = false;
+    std::vector<Diagnostic> diagnostics;
+};
+
 struct ProbeOptions {};
 
 struct ProbeResult {
     ProbeKind kind = ProbeKind::not_zarr;
     SchemaId schema_id;
     std::string schema_version;
-    std::vector<std::string> image_ids;
+    std::vector<ImageEntry> images;
+    std::optional<std::string> default_image_id;
     std::vector<Diagnostic> diagnostics;
 };
 
@@ -188,7 +195,8 @@ struct Beam {
 struct DatasetDescriptor {
     SchemaId schema_id;
     std::string schema_version;
-    std::vector<std::string> image_ids;
+    std::vector<ImageEntry> images;
+    std::optional<std::string> default_image_id;
     std::vector<Diagnostic> diagnostics;
 };
 

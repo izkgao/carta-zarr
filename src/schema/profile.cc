@@ -18,8 +18,10 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
     return Error{code, std::move(message), std::move(node_path)};
 }
 
-bool Contains(const std::vector<std::string>& names, std::string_view name) {
-    return std::find(names.begin(), names.end(), name) != names.end();
+const ImageEntry* FindImage(const ImageDiscovery& discovery, std::string_view image_id) {
+    const auto found = std::find_if(discovery.images.begin(), discovery.images.end(),
+                                    [&](const ImageEntry& image) { return image.id == image_id; });
+    return found == discovery.images.end() ? nullptr : &*found;
 }
 
 }  // namespace
@@ -59,12 +61,13 @@ Result<void> SchemaProfile::RequireOpenable(const Store& store, std::string_view
     if (!discovery) {
         return discovery.error();
     }
-    if (Contains(discovery.value().openable_image_ids, image_id)) {
+    const auto* image = FindImage(discovery.value(), image_id);
+    if (image != nullptr && image->readable) {
         return {};
     }
     // A variable this profile listed but will not open is a different answer from one it never saw,
     // and the caller can act on the difference.
-    if (Contains(discovery.value().image_ids, image_id)) {
+    if (image != nullptr) {
         return MakeError(ErrorCode::unsupported_data_type, "Image variable is not openable by this profile",
                          std::string(image_id));
     }
@@ -76,6 +79,10 @@ Result<ImageDescriptor> SchemaProfile::Describe(const Store& store, std::string_
     if (!openable) {
         return openable.error();
     }
+    return _entry->describe(store, image_id);
+}
+
+Result<ImageDescriptor> SchemaProfile::DescribeVerified(const Store& store, std::string_view image_id) const {
     return _entry->describe(store, image_id);
 }
 
@@ -121,7 +128,8 @@ Result<ProbeResult> ProbeStore(const Store& store) {
         result.kind = ProbeKind::supported_dataset;
         result.schema_id = match.result.schema_id;
         result.schema_version = match.result.schema_version;
-        result.image_ids = std::move(discovery.value().image_ids);
+        result.images = std::move(discovery.value().images);
+        result.default_image_id = std::move(discovery.value().default_image_id);
         result.diagnostics = match.result.diagnostics;
     } else if (!invalid.empty()) {
         const auto& invalid_result = invalid.front();

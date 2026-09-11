@@ -65,6 +65,15 @@ bool HasDiagnostic(const std::vector<carta::zarr::Diagnostic>& diagnostics, cons
                        [&](const auto& diagnostic) { return diagnostic.code == code; });
 }
 
+std::vector<std::string> ImageIds(const std::vector<carta::zarr::ImageEntry>& images) {
+    std::vector<std::string> ids;
+    ids.reserve(images.size());
+    for (const auto& image : images) {
+        ids.push_back(image.id);
+    }
+    return ids;
+}
+
 std::string RootMetadata(bool coordinate_system = true) {
     return coordinate_system ? R"({
   "attributes": {
@@ -143,7 +152,8 @@ void TestValidAndTimeAxis(const std::filesystem::path& root) {
     Require(static_cast<bool>(context), "Context::Create failed");
     const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
     Require(static_cast<bool>(dataset), "Dataset::Open failed");
-    Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"SKY"}, "unexpected image ids");
+    Require(ImageIds(dataset.value().descriptor().images) == std::vector<std::string>{"SKY"}, "unexpected image ids");
+    Require(dataset.value().descriptor().default_image_id == "SKY", "unexpected default image id");
 
     const auto logical_size = dataset.value().Size(std::chrono::milliseconds(0));
     Require(logical_size && logical_size.value().bytes == 592 && logical_size.value().is_upper_bound,
@@ -235,14 +245,15 @@ void TestReferenceFixture() {
     Require(static_cast<bool>(image), "OpenImage failed on reference fixture");
 
     const auto& desc = image.value().descriptor();
-    Require(dataset.value().descriptor().image_ids ==
+    const auto image_ids = ImageIds(dataset.value().descriptor().images);
+    Require(image_ids ==
                 std::vector<std::string>{"SKY", "MODEL", "RESIDUAL", "MASK_DECONVOLVE", "APERTURE", "COMPLEX"},
             "discovery did not enumerate the multi-image fixture in display order");
+    Require(dataset.value().descriptor().default_image_id == "SKY", "default image was not the first readable image");
     // right_ascension and declination are float64 over (l, m) with no type attribute. Matching only
     // "has l and m" would list them as openable images; matching the whole axis set never reads them.
     for (const auto& coordinate : {"right_ascension", "declination", "velocity", "beam_params_label"}) {
-        Require(std::find(dataset.value().descriptor().image_ids.begin(), dataset.value().descriptor().image_ids.end(),
-                          coordinate) == dataset.value().descriptor().image_ids.end(),
+        Require(std::find(image_ids.begin(), image_ids.end(), coordinate) == image_ids.end(),
                 std::string("optional coordinate ") + coordinate + " was listed as an image");
         Require(!dataset.value().OpenImage(coordinate),
                 std::string("optional coordinate ") + coordinate + " was openable as an image");
@@ -326,7 +337,7 @@ void TestDiscoveryIgnoresNameAllowlist(const std::filesystem::path& root) {
     Require(static_cast<bool>(context), "Context::Create failed for unlisted image");
     const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
     Require(static_cast<bool>(dataset), "unlisted image dataset did not open");
-    Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"SKY", "UNLISTED"},
+    Require(ImageIds(dataset.value().descriptor().images) == std::vector<std::string>{"SKY", "UNLISTED"},
             "image discovery still used the known-name allowlist");
     const auto image = dataset.value().OpenImage("UNLISTED");
     Require(static_cast<bool>(image), "unlisted sky-plane image was not openable");
@@ -367,7 +378,7 @@ void TestDiscoveryDoesNotDescendIntoArrayChunks(const std::filesystem::path& roo
     Require(static_cast<bool>(context), "Context::Create failed for chunk traversal test");
     const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
     Require(static_cast<bool>(dataset), "Dataset::Open failed for chunk traversal test");
-    Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"SKY"},
+    Require(ImageIds(dataset.value().descriptor().images) == std::vector<std::string>{"SKY"},
             "discovery descended into an array's chunk directory");
 }
 
@@ -615,7 +626,7 @@ void TestImageDatasetWithoutSky(const std::filesystem::path& root) {
     Require(static_cast<bool>(context), "Context::Create failed for the SKY-less dataset");
     const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
     Require(static_cast<bool>(dataset), "Dataset::Open failed for the SKY-less dataset");
-    Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"RESIDUAL"},
+    Require(ImageIds(dataset.value().descriptor().images) == std::vector<std::string>{"RESIDUAL"},
             "the SKY-less dataset did not enumerate its only image");
     Require(static_cast<bool>(dataset.value().OpenImage("RESIDUAL")),
             "the only image of a SKY-less dataset could not be opened");

@@ -361,14 +361,15 @@ Result<Dataset> Dataset::Open(const Context& context, std::string_view location)
             return MakeError(code, "The Zarr store is not a supported XRADIO image dataset", std::string(location));
         }
 
-        if (probe.image_ids.empty()) {
+        if (probe.images.empty()) {
             return MakeError(ErrorCode::invalid_metadata, "Supported schema has no image variables",
                              std::string(location));
         }
         DatasetDescriptor descriptor;
         descriptor.schema_id = probe.schema_id;
         descriptor.schema_version = probe.schema_version;
-        descriptor.image_ids = probe.image_ids;
+        descriptor.images = probe.images;
+        descriptor.default_image_id = probe.default_image_id;
         descriptor.diagnostics = probe.diagnostics;
         return Dataset{std::make_shared<Impl>(context._impl, std::string(location), std::move(descriptor),
                                               std::move(store_result.value()))};
@@ -405,6 +406,16 @@ Result<Image> Dataset::OpenImage(std::string_view image_id) const {
     }
     std::scoped_lock const lock(_impl->mutex);
     const std::string image_name(image_id);
+    const auto entry = std::find_if(_impl->descriptor.images.begin(), _impl->descriptor.images.end(),
+                                    [&](const ImageEntry& image) { return image.id == image_name; });
+    if (entry == _impl->descriptor.images.end()) {
+        return MakeError(ErrorCode::not_found, "Image variable was not found", image_name);
+    }
+    if (!entry->readable) {
+        const auto message = entry->diagnostics.empty() ? "Image variable is not openable by this profile"
+                                                        : entry->diagnostics.front().message;
+        return MakeError(ErrorCode::unsupported_data_type, message, image_name);
+    }
     const auto make_image = [&](const ImageDescriptor& descriptor) {
         // The descriptor already carries the stored layout; the geometry is that layout permuted
         // into logical order, so it is derived here rather than read again.
@@ -421,7 +432,7 @@ Result<Image> Dataset::OpenImage(std::string_view image_id) const {
     if (!profile) {
         return profile.error();
     }
-    auto image_descriptor = profile.value().Describe(*_impl->store, image_id);
+    auto image_descriptor = profile.value().DescribeVerified(*_impl->store, image_id);
     if (!image_descriptor) {
         return image_descriptor.error();
     }
