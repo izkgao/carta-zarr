@@ -24,7 +24,10 @@
 
 namespace {
 
-const char* const kFixture = CARTA_ZARR_PIXEL_FIXTURE;
+// The same image written both ways round: one store puts m last, the other l. Every test below runs
+// against both, because a reader that decides anything from where an axis sits rather than from
+// what it is named gets a different answer for one of the two.
+const char* const kFixtures[]{CARTA_ZARR_PIXEL_FIXTURE, CARTA_ZARR_PIXEL_FIXTURE_L_FASTEST};
 
 // Axis lengths of the fixture, in the logical order the library reports.
 constexpr std::uint64_t kL = 4;
@@ -54,7 +57,7 @@ void Require(bool condition, const std::string& message) {
     }
 }
 
-carta::zarr::Image OpenSky() {
+carta::zarr::Image OpenSky(const char* kFixture) {
     Require(std::filesystem::exists(kFixture),
             "the pixel fixture is missing; run tests/data/generate_zarr_fixtures.py");
     const auto context = carta::zarr::Context::Create();
@@ -403,17 +406,29 @@ void TestProgressiveRead(const carta::zarr::Image& sky) {
 }  // namespace
 
 int main() {
+    std::vector<carta::zarr::AxisRole> fast_axes;
+    for (const char* const fixture : kFixtures) {
+        try {
+            const auto sky = OpenSky(fixture);
+            fast_axes.push_back(sky.chunk_geometry().fastest_spatial_axis);
+            TestAxesAndGeometry(sky);
+            TestWholeImage(sky);
+            TestSubsetAndStride(sky);
+            TestPixelMask(sky);
+            TestMaskFusion(sky);
+            TestRejectedRequests(sky);
+            TestReadControls(sky);
+            TestProgressiveRead(sky);
+            TestConcurrentReads(sky);
+        } catch (const std::exception& error) {
+            std::cerr << "pixel read test failed on " << fixture << ": " << error.what() << "\n";
+            return 1;
+        }
+    }
     try {
-        const auto sky = OpenSky();
-        TestAxesAndGeometry(sky);
-        TestWholeImage(sky);
-        TestSubsetAndStride(sky);
-        TestPixelMask(sky);
-        TestMaskFusion(sky);
-        TestRejectedRequests(sky);
-        TestReadControls(sky);
-        TestProgressiveRead(sky);
-        TestConcurrentReads(sky);
+        Require(fast_axes.size() == 2 && fast_axes.at(0) != fast_axes.at(1),
+                "the two fixtures should disagree about which spatial axis the store varies fastest; "
+                "if they agree, one of them was regenerated wrongly and half of this is untested");
     } catch (const std::exception& error) {
         std::cerr << "pixel read test failed: " << error.what() << "\n";
         return 1;

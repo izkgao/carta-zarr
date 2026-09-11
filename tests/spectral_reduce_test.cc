@@ -22,7 +22,11 @@
 
 namespace {
 
-const char* const kFixture = CARTA_ZARR_PIXEL_FIXTURE;
+// The same image written both ways round: XRADIO puts m last, so a plane is contiguous along m,
+// and the other one puts l last. Everything below runs against both, because the walk decides what
+// to ask the store for from which axis it varies fastest -- a decision only one of the two can
+// exercise at a time, and the wrong answer for either is a silently transposed read.
+const char* const kFixtures[]{CARTA_ZARR_PIXEL_FIXTURE, CARTA_ZARR_PIXEL_FIXTURE_L_FASTEST};
 
 constexpr std::uint64_t kL = 4;
 constexpr std::uint64_t kM = 5;
@@ -58,12 +62,12 @@ void RequireClose(double actual, double expected, const std::string& message) {
             message + ": expected " + std::to_string(expected) + ", got " + std::to_string(actual));
 }
 
-carta::zarr::Image OpenSky() {
-    Require(std::filesystem::exists(kFixture),
+carta::zarr::Image OpenSky(const char* fixture) {
+    Require(std::filesystem::exists(fixture),
             "the pixel fixture is missing; run tests/data/generate_zarr_fixtures.py");
     const auto context = carta::zarr::Context::Create();
     Require(static_cast<bool>(context), "Context::Create failed");
-    auto dataset = carta::zarr::Dataset::Open(context.value(), kFixture);
+    auto dataset = carta::zarr::Dataset::Open(context.value(), fixture);
     Require(static_cast<bool>(dataset), "Dataset::Open failed on the pixel fixture");
     auto image = dataset.value().OpenImage("SKY");
     Require(static_cast<bool>(image), "SKY could not be opened");
@@ -573,21 +577,33 @@ void TestRejectedRequests(const carta::zarr::Image& sky) {
 }  // namespace
 
 int main() {
+    std::vector<carta::zarr::AxisRole> fast_axes;
+    for (const char* const fixture : kFixtures) {
+        try {
+            const auto sky = OpenSky(fixture);
+            fast_axes.push_back(sky.chunk_geometry().fastest_spatial_axis);
+            TestRegionsSpanningChunks(sky);
+            TestMissingChunkHasNoFinitePixels(sky);
+            TestRasterMaskAndNullMaskAgree(sky);
+            TestOnlyRequestedStatisticsAreReported(sky);
+            TestStrideSelectsChannels(sky);
+            TestEmitGranularityIsReported(sky);
+            TestABigRegionIsEmittedALayerAtATime(sky);
+            TestAnUnfinishedBlockIsHandedOver(sky);
+            TestAMaskNarrowsTheChunksTheWalkReads(sky);
+            TestRunsSelectTheSamePixelsAsTheRaster(sky);
+            TestRunsNarrowTheChunksTheWalkReads(sky);
+            TestSinkCancels(sky);
+            TestRejectedRequests(sky);
+        } catch (const std::exception& error) {
+            std::cerr << "spectral reduce test failed on " << fixture << ": " << error.what() << "\n";
+            return 1;
+        }
+    }
     try {
-        const auto sky = OpenSky();
-        TestRegionsSpanningChunks(sky);
-        TestMissingChunkHasNoFinitePixels(sky);
-        TestRasterMaskAndNullMaskAgree(sky);
-        TestOnlyRequestedStatisticsAreReported(sky);
-        TestStrideSelectsChannels(sky);
-        TestEmitGranularityIsReported(sky);
-    TestABigRegionIsEmittedALayerAtATime(sky);
-    TestAnUnfinishedBlockIsHandedOver(sky);
-    TestAMaskNarrowsTheChunksTheWalkReads(sky);
-    TestRunsSelectTheSamePixelsAsTheRaster(sky);
-    TestRunsNarrowTheChunksTheWalkReads(sky);
-        TestSinkCancels(sky);
-        TestRejectedRequests(sky);
+        Require(fast_axes.size() == 2 && fast_axes.at(0) != fast_axes.at(1),
+                "the two fixtures should disagree about which spatial axis the store varies fastest; "
+                "if they agree, one of them was regenerated wrongly and half the walk is untested");
     } catch (const std::exception& error) {
         std::cerr << "spectral reduce test failed: " << error.what() << "\n";
         return 1;

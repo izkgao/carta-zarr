@@ -346,7 +346,7 @@ def generate_xradio_fixture(path: Path, *, typed: bool, consolidated: bool) -> N
         add_consolidated_metadata(path)
 
 
-def generate_pixel_fixture(path: Path) -> None:
+def generate_pixel_fixture(path: Path, *, l_fastest: bool = False) -> None:
     """An XRADIO image whose pixels are readable and self-describing.
 
     The other XRADIO fixtures carry only fill values, so they pin metadata and say nothing about a
@@ -356,8 +356,19 @@ def generate_pixel_fixture(path: Path) -> None:
     pixel-mask paths get a definition instead of an assumption.
     """
     time_size, frequency_size, polarization_size, l_size, m_size = 1, 2, 3, 4, 5
-    shape = (time_size, frequency_size, polarization_size, l_size, m_size)
-    chunks = (1, 1, 1, 2, 5)
+    # XRADIO writes m last, so m is the axis a plane is contiguous along. A store that writes l last
+    # is the same image with the spatial pair swapped, and a reader that decides anything from the
+    # position of an axis rather than from its name gets a different answer for one of the two.
+    if l_fastest:
+        names = ("time", "frequency", "polarization", "m", "l")
+        shape = (time_size, frequency_size, polarization_size, m_size, l_size)
+        chunks = (1, 1, 1, 5, 2)
+        missing_chunk_key = ("0", "1", "2", "0", "1")
+    else:
+        names = ("time", "frequency", "polarization", "l", "m")
+        shape = (time_size, frequency_size, polarization_size, l_size, m_size)
+        chunks = (1, 1, 1, 2, 5)
+        missing_chunk_key = ("0", "1", "2", "1", "0")
 
     root = zarr.open_group(store=path, mode="w", zarr_format=3)
     root.attrs.update(
@@ -379,8 +390,10 @@ def generate_pixel_fixture(path: Path) -> None:
 
     # value = t*10000 + f*1000 + p*100 + l*10 + m, so a misplaced element names where it came from.
     indices = np.indices(shape)
+    l_index = indices[4] if l_fastest else indices[3]
+    m_index = indices[3] if l_fastest else indices[4]
     values = (
-        indices[0] * 10000 + indices[1] * 1000 + indices[2] * 100 + indices[3] * 10 + indices[4]
+        indices[0] * 10000 + indices[1] * 1000 + indices[2] * 100 + l_index * 10 + m_index
     ).astype(np.float32)
 
     sky = zarr.create_array(
@@ -389,7 +402,7 @@ def generate_pixel_fixture(path: Path) -> None:
         chunks=chunks,
         dtype=np.float32,
         zarr_format=3,
-        dimension_names=("time", "frequency", "polarization", "l", "m"),
+        dimension_names=names,
         serializer=BytesCodec(endian="little"),
         compressors=[ZstdCodec(level=1)],
         fill_value=float("nan"),
@@ -414,14 +427,14 @@ def generate_pixel_fixture(path: Path) -> None:
 
     # True means a good pixel. The pattern crosses chunk boundaries so a mask read that ignores the
     # transpose cannot accidentally agree.
-    flags = ((indices[3] + indices[4]) % 3 != 0)
+    flags = ((l_index + m_index) % 3 != 0)
     flag = zarr.create_array(
         store=path / "FLAG",
         shape=shape,
         chunks=chunks,
         dtype=np.bool_,
         zarr_format=3,
-        dimension_names=("time", "frequency", "polarization", "l", "m"),
+        dimension_names=names,
         serializer=BytesCodec(endian="little"),
         compressors=[ZstdCodec(level=1)],
         fill_value=False,
@@ -430,7 +443,7 @@ def generate_pixel_fixture(path: Path) -> None:
     flag[:] = flags
 
     # Drop one written chunk so that a read crossing it has to fall back to the fill value.
-    missing_chunk = path / "SKY" / "c" / "0" / "1" / "2" / "1" / "0"
+    missing_chunk = path / "SKY" / "c" / Path(*missing_chunk_key)
     if not missing_chunk.exists():
         raise RuntimeError(f"expected chunk {missing_chunk} to exist before deleting it")
     missing_chunk.unlink()
@@ -471,13 +484,14 @@ def main() -> None:
     # Remove only what this script owns. xradio/conformance lives under the same directory but is
     # written by generate_conformance_fixtures.py against a pinned XRADIO, and wiping the whole tree
     # here would delete a fixture this script cannot rebuild.
-    for owned in ("string", "xradio/minimal", "xradio/legacy", "xradio/pixels"):
+    for owned in ("string", "xradio/minimal", "xradio/legacy", "xradio/pixels", "xradio/pixels_l_fastest"):
         shutil.rmtree(OUTPUT_DIR / owned, ignore_errors=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     generate_string_fixtures()
     generate_xradio_fixture(OUTPUT_DIR / "xradio" / "minimal", typed=True, consolidated=True)
     generate_xradio_fixture(OUTPUT_DIR / "xradio" / "legacy", typed=False, consolidated=False)
     generate_pixel_fixture(OUTPUT_DIR / "xradio" / "pixels")
+    generate_pixel_fixture(OUTPUT_DIR / "xradio" / "pixels_l_fastest", l_fastest=True)
 
 
 if __name__ == "__main__":
