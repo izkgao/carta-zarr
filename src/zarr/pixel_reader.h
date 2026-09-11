@@ -16,6 +16,9 @@
 
 namespace carta::zarr::internal::zarr {
 
+// Check cooperative cancellation and the deadline at a storage-operation boundary.
+Result<void> CheckReadControl(const ReadOptions& options, std::string_view node);
+
 /**
  * One hyperslab of an array, addressed in the array's own stored axis order.
  *
@@ -28,6 +31,8 @@ struct PixelSelection {
     std::vector<std::uint64_t> start;
     std::vector<std::uint64_t> count;
     std::vector<std::uint64_t> stride;
+    // The full array shape from the Store's canonical metadata, in stored axis order.
+    std::vector<std::uint64_t> shape;
     // logical_to_stored[i] is the stored dimension that logical axis i names. The destination is
     // written densely in logical order with axis 0 fastest-varying.
     std::vector<std::size_t> logical_to_stored;

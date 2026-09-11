@@ -53,7 +53,7 @@ Result<SchemaProbeResult> SchemaProfile::Probe(const Store& store) const {
 }
 
 Result<ImageDiscovery> SchemaProfile::Discover(const Store& store) const {
-    return _entry->discover(store);
+    return store.CachedImageDiscovery(_entry->id, [&] { return _entry->discover(store); });
 }
 
 Result<void> SchemaProfile::RequireOpenable(const Store& store, std::string_view image_id) const {

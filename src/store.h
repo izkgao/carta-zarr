@@ -29,6 +29,12 @@ namespace zarr {
 struct PixelSelection;
 }
 
+struct ImageDiscovery {
+    std::vector<ImageEntry> images;
+    std::optional<std::string> default_image_id;
+    std::vector<Diagnostic> diagnostics;
+};
+
 // Everything a Store remembers for the lifetime of its read-only view.
 //
 // Each table carries its own lock, and that is load-bearing rather than incidental: a Memo holds its
@@ -49,6 +55,7 @@ struct StoreCaches {
     Memo<std::string, Result<nlohmann::json>> node_metadata;
     Memo<std::string, Result<zarr::ArrayMetadata>> array_metadata;
     Lazy<Result<std::vector<std::pair<std::string, nlohmann::json>>>> listed_metadata;
+    Memo<std::string, Result<ImageDiscovery>> image_discoveries;
     Memo<std::string, Result<std::vector<double>>> double_arrays;
     Memo<std::string, Result<std::vector<std::string>>> string_arrays;
 };
@@ -74,6 +81,10 @@ public:
     Result<nlohmann::json> ReadNodeMetadata(std::string_view node) const;
     Result<zarr::ArrayMetadata> ReadArrayMetadata(std::string_view node) const;
     Result<std::vector<std::pair<std::string, nlohmann::json>>> ListNodeMetadata() const;
+    template <typename Compute>
+    Result<ImageDiscovery> CachedImageDiscovery(std::string_view profile_id, Compute compute) const {
+        return _caches->image_discoveries.GetOrCompute(std::string(profile_id), compute);
+    }
     Result<std::uint64_t> ComputeTotalArraySizeBytes() const;
     // Values in C order, flattened. The rank is in the node's ArrayMetadata; ArrayView addresses
     // them by dimension name rather than by offset.

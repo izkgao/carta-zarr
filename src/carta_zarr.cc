@@ -149,6 +149,7 @@ Result<internal::zarr::PixelSelection> BuildSelection(const ImageDescriptor& des
     selection.start.assign(rank, 0);
     selection.count.assign(rank, 0);
     selection.stride.assign(rank, 1);
+    selection.shape.assign(rank, 0);
     selection.logical_to_stored.resize(rank);
 
     for (std::size_t logical = 0; logical < rank; ++logical) {
@@ -178,6 +179,7 @@ Result<internal::zarr::PixelSelection> BuildSelection(const ImageDescriptor& des
         selection.start.at(stored) = range.start;
         selection.count.at(stored) = range.count;
         selection.stride.at(stored) = range.stride;
+        selection.shape.at(stored) = axis.length;
         selection.logical_to_stored.at(logical) = stored;
     }
     return selection;
@@ -247,6 +249,13 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
     if (elements == 0 || elements > destination.byte_size / sizeof(float)) {
         return MakeError(ErrorCode::invalid_argument, "Destination buffer is too small for the request",
                          _impl->descriptor.id);
+    }
+
+    // Do this before allocating a mask or starting any storage work. A cancelled request must not
+    // consume temporary memory just to discover that it cannot proceed.
+    auto control = internal::zarr::CheckReadControl(options, _impl->descriptor.id);
+    if (!control) {
+        return control.error();
     }
 
     auto* pixels = static_cast<float*>(destination.data);

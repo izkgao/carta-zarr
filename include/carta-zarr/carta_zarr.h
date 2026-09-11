@@ -50,7 +50,8 @@ public:
     const ChunkGeometry& chunk_geometry() const noexcept;
 
     // Reads a densely packed result in logical axis order, axis 0 fastest-varying. Returns the
-    // number of elements written. Safe to call concurrently on one handle.
+    // number of elements written. Safe to call concurrently on one handle. On failure, the
+    // destination may be unchanged, partially written, or fully written; callers must discard it.
     Result<std::size_t> Read(const ReadRequest& request, MutableBufferView destination) const;
     Result<std::size_t> Read(const ReadRequest& request, MutableBufferView destination,
                              const ReadOptions& options) const;

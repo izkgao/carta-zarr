@@ -14,12 +14,6 @@
 
 namespace carta::zarr::internal {
 
-struct ImageDiscovery {
-    std::vector<ImageEntry> images;
-    std::optional<std::string> default_image_id;
-    std::vector<Diagnostic> diagnostics;
-};
-
 /**
  * A named, versioned description of how an image dataset is laid out, bound to its identifier.
  *

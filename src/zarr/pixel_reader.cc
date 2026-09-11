@@ -32,19 +32,9 @@ Error MakeError(ErrorCode code, std::string message, std::string node_path = {})
     return Error{code, std::move(message), std::move(node_path)};
 }
 
-Result<void> CheckReadControl(const ReadOptions& options, std::string_view node) {
-    if (options.cancellation_requested && options.cancellation_requested()) {
-        return MakeError(ErrorCode::cancelled, "Pixel read was cancelled", std::string(node));
-    }
-    if (std::chrono::steady_clock::now() >= options.deadline) {
-        return MakeError(ErrorCode::cancelled, "Pixel read deadline expired", std::string(node));
-    }
-    return {};
-}
-
 bool SelectionIsWellFormed(const PixelSelection& selection) {
     const auto rank = selection.start.size();
-    if (rank == 0 || selection.count.size() != rank || selection.stride.size() != rank ||
+    if (rank == 0 || selection.count.size() != rank || selection.stride.size() != rank || selection.shape.size() != rank ||
         selection.logical_to_stored.size() != rank) {
         return false;
     }
@@ -102,6 +92,18 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
         if (static_cast<std::size_t>(store.rank()) != rank) {
             return MakeError(ErrorCode::invalid_argument, "Selection rank does not match the array rank",
                              std::string(node));
+        }
+        const auto actual_shape = store.domain().shape();
+        if (actual_shape.size() != rank) {
+            return MakeError(ErrorCode::invalid_metadata, "Array rank differs between metadata sources",
+                             std::string(node));
+        }
+        for (std::size_t axis = 0; axis < rank; ++axis) {
+            if (actual_shape.at(axis) != static_cast<tensorstore::Index>(selection.shape.at(axis))) {
+                return MakeError(ErrorCode::invalid_metadata,
+                                 "Array shape differs between canonical metadata and the array store",
+                                 std::string(node));
+            }
         }
 
         std::vector<tensorstore::Index> start(rank);
@@ -162,6 +164,16 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
 }
 
 }  // namespace
+
+Result<void> CheckReadControl(const ReadOptions& options, std::string_view node) {
+    if (options.cancellation_requested && options.cancellation_requested()) {
+        return MakeError(ErrorCode::cancelled, "Pixel read was cancelled", std::string(node));
+    }
+    if (std::chrono::steady_clock::now() >= options.deadline) {
+        return MakeError(ErrorCode::cancelled, "Pixel read deadline expired", std::string(node));
+    }
+    return {};
+}
 
 std::uint64_t SelectionElementCount(const PixelSelection& selection) {
     if (selection.count.empty()) {
