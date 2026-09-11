@@ -40,6 +40,12 @@ struct PixelSelection {
     std::vector<std::size_t> logical_to_stored;
 };
 
+// Translate a request over the logical axes into the stored axis order the array is written in,
+// checking it against the descriptor on the way. Ranges are validated here rather than left to
+// TensorStore so that an out-of-range request is an invalid_argument naming the axis, instead of an
+// I/O error naming a domain.
+Result<PixelSelection> BuildSelection(const ImageDescriptor& descriptor, const ReadRequest& request);
+
 // Element count the selection produces, or zero when it is malformed.
 std::uint64_t SelectionElementCount(const PixelSelection& selection);
 

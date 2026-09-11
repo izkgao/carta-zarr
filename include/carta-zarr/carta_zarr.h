@@ -60,6 +60,23 @@ public:
     // pixel. Reports not_found when the image has no mask.
     Result<std::size_t> ReadPixelMask(const ReadRequest& request, MutableBufferView destination) const;
 
+    // Reduces every region over the same channels in one pass over the pixels, handing results to
+    // the sink block by block.
+    //
+    // The pass visits each covered chunk once and accumulates every region that touches it, which
+    // is the whole point of taking N regions instead of being called N times: a position-velocity
+    // cut along the diagonal of a 4096^2 image is 5,792 overlapping boxes, and reducing them one at
+    // a time decompresses the same chunks thousands of times over.
+    //
+    // Results stream rather than accumulate: those 5,792 regions over 30,000 channels would be
+    // 2.59 GiB returned at once. Each block is valid only inside the sink call.
+    //
+    // The image's pixel mask is always applied when it has one. ReadOptions supplies cancellation,
+    // the deadline, and a ceiling on the pixel buffer the pass may hold.
+    Result<void> ReduceSpectral(const SpectralReduceRequest& request, const SpectralSink& sink) const;
+    Result<void> ReduceSpectral(const SpectralReduceRequest& request, const SpectralSink& sink,
+                                const ReadOptions& options) const;
+
     Result<std::vector<Beam>> ReadBeams() const;
 
 private:

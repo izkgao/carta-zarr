@@ -6,6 +6,7 @@
 
 #include "carta-zarr/carta_zarr.h"
 
+#include "reduce/spectral_reduce.h"
 #include "schema/profile.h"
 #include "store.h"
 #include "zarr/array_metadata.h"
@@ -131,63 +132,6 @@ public:
 
 namespace {
 
-// Translate a request expressed over the logical axes into the stored axis order the array is
-// written in, checking it against the descriptor on the way. Ranges are validated here rather than
-// left to TensorStore so that an out-of-range request is an invalid_argument naming the axis,
-// instead of an I/O error naming a domain.
-Result<internal::zarr::PixelSelection> BuildSelection(const ImageDescriptor& descriptor,
-                                                      const ReadRequest& request) {
-    const auto rank = descriptor.axes.size();
-    if (request.axes.size() != rank) {
-        return MakeError(ErrorCode::invalid_argument,
-                         "Request has " + std::to_string(request.axes.size()) + " axes but the image has " +
-                             std::to_string(rank),
-                         descriptor.id);
-    }
-
-    internal::zarr::PixelSelection selection;
-    selection.start.assign(rank, 0);
-    selection.count.assign(rank, 0);
-    selection.stride.assign(rank, 1);
-    selection.shape.assign(rank, 0);
-    selection.dimension_names.assign(rank, {});
-    selection.logical_to_stored.resize(rank);
-
-    for (std::size_t logical = 0; logical < rank; ++logical) {
-        const auto& axis = descriptor.axes.at(logical);
-        const auto& range = request.axes.at(logical);
-        if (range.stride == 0) {
-            return MakeError(ErrorCode::invalid_argument, "Axis '" + axis.name + "' has a zero stride",
-                             descriptor.id);
-        }
-        if (range.count == 0) {
-            return MakeError(ErrorCode::invalid_argument, "Axis '" + axis.name + "' selects no elements",
-                             descriptor.id);
-        }
-        // The last selected index, which is what has to fall inside the axis.
-        const std::uint64_t span = (range.count - 1) * range.stride;
-        if (range.start >= axis.length || span > axis.length - 1 - range.start) {
-            return MakeError(ErrorCode::invalid_argument,
-                             "Axis '" + axis.name + "' request exceeds its length of " +
-                                 std::to_string(axis.length),
-                             descriptor.id);
-        }
-        const auto stored = axis.storage_index;
-        if (stored >= rank) {
-            return MakeError(ErrorCode::invalid_metadata, "Axis '" + axis.name + "' has an out-of-range storage index",
-                             descriptor.id);
-        }
-        selection.start.at(stored) = range.start;
-        selection.count.at(stored) = range.count;
-        selection.stride.at(stored) = range.stride;
-        selection.shape.at(stored) = axis.length;
-        selection.dimension_names.at(stored) = axis.name;
-        selection.logical_to_stored.at(logical) = stored;
-    }
-    return selection;
-}
-
-
 ChunkGeometry BuildChunkGeometry(const ImageDescriptor& descriptor, const StorageLayout& layout) {
     ChunkGeometry geometry;
     geometry.sharded = layout.sharded;
@@ -243,7 +187,7 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
                          _impl->descriptor.id);
     }
 
-    auto selection = BuildSelection(_impl->descriptor, request);
+    auto selection = internal::zarr::BuildSelection(_impl->descriptor, request);
     if (!selection) {
         return selection.error();
     }
@@ -310,7 +254,7 @@ Result<std::size_t> Image::ReadPixelMask(const ReadRequest& request, MutableBuff
         return MakeError(ErrorCode::not_found, "This image has no pixel mask", _impl->descriptor.id);
     }
 
-    auto selection = BuildSelection(_impl->descriptor, request);
+    auto selection = internal::zarr::BuildSelection(_impl->descriptor, request);
     if (!selection) {
         return selection.error();
     }
@@ -327,6 +271,18 @@ Result<std::size_t> Image::ReadPixelMask(const ReadRequest& request, MutableBuff
         return read.error();
     }
     return static_cast<std::size_t>(elements);
+}
+
+Result<void> Image::ReduceSpectral(const SpectralReduceRequest& request, const SpectralSink& sink) const {
+    return ReduceSpectral(request, sink, ReadOptions{});
+}
+
+Result<void> Image::ReduceSpectral(const SpectralReduceRequest& request, const SpectralSink& sink,
+                                   const ReadOptions& options) const {
+    if (!_impl || !_impl->store) {
+        return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
+    }
+    return internal::ReduceSpectral(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options);
 }
 
 Result<std::vector<Beam>> Image::ReadBeams() const {

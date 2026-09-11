@@ -46,6 +46,7 @@ endif()
 
 add_library(carta_zarr SHARED
     src/carta_zarr.cc
+    src/reduce/spectral_reduce.cc
     src/schema/profile.cc
     src/schema/xradio/probe_report.cc
     src/schema/xradio/linear_axis.cc
@@ -233,6 +234,16 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         CARTA_ZARR_PIXEL_FIXTURE="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels")
     target_link_libraries(carta_zarr_pixel_read_tests PRIVATE Threads::Threads)
     add_test(NAME carta-zarr-pixel-read COMMAND carta_zarr_pixel_read_tests)
+
+    # The spectral reduction is checked against an oracle recomputed from the fixture's encoding,
+    # not against a recorded answer, so that a walk which reads the right pixels but double-counts a
+    # region straddling two chunks disagrees with it.
+    add_executable(carta_zarr_spectral_reduce_tests tests/spectral_reduce_test.cc)
+    target_link_libraries(carta_zarr_spectral_reduce_tests PRIVATE CARTA::zarr)
+    target_compile_features(carta_zarr_spectral_reduce_tests PRIVATE cxx_std_17)
+    target_compile_definitions(carta_zarr_spectral_reduce_tests PRIVATE
+        CARTA_ZARR_PIXEL_FIXTURE="${CARTA_ZARR_FIXTURE_DIR}/xradio/pixels")
+    add_test(NAME carta-zarr-spectral-reduce COMMAND carta_zarr_spectral_reduce_tests)
 
     if(CARTA_ZARR_BUILD_PACKAGE_TEST)
         add_test(
