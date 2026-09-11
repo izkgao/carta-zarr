@@ -115,9 +115,13 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
     buckets.rows = ((buckets.y1 - 1) / chunk_height) - buckets.chunk_y0 + 1;
 
     const auto cells = static_cast<std::size_t>(buckets.columns * buckets.rows);
+    if (cells > std::numeric_limits<std::uint32_t>::max()) {
+        return MakeError(ErrorCode::invalid_argument,
+                         "The regions span more chunks than one reduction can index", node);
+    }
     buckets.offsets.assign(cells + 1, 0);
 
-    // The chunk span of one region, used identically by the counting and the filling pass.
+    // The chunk span of one region's bounding box.
     const auto span = [&](const RegionMask& region, std::uint64_t& cx0, std::uint64_t& cx1, std::uint64_t& cy0,
                           std::uint64_t& cy1) {
         cx0 = region.x_start / chunk_width;
@@ -126,35 +130,90 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
         cy1 = (region.y_start + region.height - 1) / chunk_height;
     };
 
-    std::uint64_t incidences = 0;
-    for (std::size_t i = 0; i < region_count; ++i) {
+    // The chunks a region actually occupies, which is not the same as the chunks its bounding box
+    // covers. A thin rectangle laid along the diagonal has a bounding box the size of the image and
+    // sets a thousandth of it; bucketing by the box would read every chunk to reach the band. The
+    // mask decides instead, at the cost of one pass over it -- bytes the caller already holds, and
+    // a fraction of what reading the chunks they would otherwise stand for costs.
+    //
+    // A null mask means the whole bounding box, so there is nothing to narrow and nothing to scan.
+    std::vector<std::uint8_t> occupied;
+    const auto for_each_cell = [&](const RegionMask& region, auto&& visit) {
         std::uint64_t cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
-        span(regions[i], cx0, cx1, cy0, cy1);
-        incidences += (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
-        if (incidences > kMaxChunkIncidences) {
+        span(region, cx0, cx1, cy0, cy1);
+        if (region.mask == nullptr) {
+            for (auto cy = cy0; cy <= cy1; ++cy) {
+                for (auto cx = cx0; cx <= cx1; ++cx) {
+                    visit(cx, cy);
+                }
+            }
+            return;
+        }
+
+        const std::uint64_t columns = cx1 - cx0 + 1;
+        const std::uint64_t x_end = region.x_start + region.width;
+        occupied.assign(static_cast<std::size_t>(columns), 0);
+        for (auto cy = cy0; cy <= cy1; ++cy) {
+            std::fill(occupied.begin(), occupied.end(), std::uint8_t{0});
+            std::uint64_t found = 0;
+            const std::uint64_t y_first = std::max(region.y_start, cy * chunk_height);
+            const std::uint64_t y_last = std::min(region.y_start + region.height, (cy + 1) * chunk_height);
+            for (std::uint64_t y = y_first; y < y_last && found < columns; ++y) {
+                const std::uint8_t* row = region.mask + ((y - region.y_start) * region.width);
+                std::uint64_t x = region.x_start;
+                while (x < x_end) {
+                    const std::uint64_t column = x / chunk_width;
+                    const std::uint64_t boundary = std::min(x_end, (column + 1) * chunk_width);
+                    auto& seen = occupied.at(static_cast<std::size_t>(column - cx0));
+                    if (seen == 0) {
+                        for (std::uint64_t k = x; k < boundary; ++k) {
+                            if (row[k - region.x_start] != 0) {
+                                seen = 1;
+                                ++found;
+                                break;
+                            }
+                        }
+                    }
+                    x = boundary;
+                }
+            }
+            for (std::uint64_t cx = cx0; cx <= cx1; ++cx) {
+                if (occupied.at(static_cast<std::size_t>(cx - cx0)) != 0) {
+                    visit(cx, cy);
+                }
+            }
+        }
+    };
+
+    // Counting sort needs the counts before it can place anything, but the mask is the most
+    // expensive thing here to look at twice -- a region whose box is the image is tens of megabytes
+    // of it. So the incidences are recorded once, in region order, and the two passes read that.
+    std::vector<std::uint32_t> incidence_cells;
+    std::vector<std::uint64_t> region_first(region_count + 1, 0);
+    for (std::size_t i = 0; i < region_count; ++i) {
+        for_each_cell(regions[i], [&](std::uint64_t cx, std::uint64_t cy) {
+            incidence_cells.push_back(static_cast<std::uint32_t>(buckets.Cell(cx, cy)));
+        });
+        if (incidence_cells.size() > kMaxChunkIncidences) {
             return MakeError(ErrorCode::invalid_argument,
                              "The regions together touch more chunks than one reduction can index", node);
         }
-        for (auto cy = cy0; cy <= cy1; ++cy) {
-            for (auto cx = cx0; cx <= cx1; ++cx) {
-                ++buckets.offsets.at(buckets.Cell(cx, cy) + 1);
-            }
-        }
+        region_first.at(i + 1) = incidence_cells.size();
+    }
+
+    for (const auto cell : incidence_cells) {
+        ++buckets.offsets.at(static_cast<std::size_t>(cell) + 1);
     }
     for (std::size_t cell = 0; cell < cells; ++cell) {
         buckets.offsets.at(cell + 1) += buckets.offsets.at(cell);
     }
 
-    buckets.entries.resize(static_cast<std::size_t>(incidences));
+    buckets.entries.resize(incidence_cells.size());
     std::vector<std::uint64_t> cursor(buckets.offsets.begin(), buckets.offsets.end() - 1);
     for (std::size_t i = 0; i < region_count; ++i) {
-        std::uint64_t cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
-        span(regions[i], cx0, cx1, cy0, cy1);
-        for (auto cy = cy0; cy <= cy1; ++cy) {
-            for (auto cx = cx0; cx <= cx1; ++cx) {
-                buckets.entries.at(static_cast<std::size_t>(cursor.at(buckets.Cell(cx, cy))++)) =
-                    static_cast<std::uint32_t>(i);
-            }
+        for (auto k = region_first.at(i); k < region_first.at(i + 1); ++k) {
+            const auto cell = static_cast<std::size_t>(incidence_cells.at(static_cast<std::size_t>(k)));
+            buckets.entries.at(static_cast<std::size_t>(cursor.at(cell)++)) = static_cast<std::uint32_t>(i);
         }
     }
     return buckets;
