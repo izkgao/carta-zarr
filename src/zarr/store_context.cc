@@ -17,6 +17,10 @@
 
 namespace carta::zarr::internal {
 
+StoreContextPtr StoreContext::CloneForStore() const {
+    return std::make_shared<const StoreContext>(context);
+}
+
 Result<tensorstore::TensorStore<>> StoreContext::OpenArray(const std::filesystem::path& array_path,
                                                            std::string_view node) const {
     const std::string key = array_path.string();

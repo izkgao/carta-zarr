@@ -343,7 +343,10 @@ Result<Dataset> Dataset::Open(const Context& context, std::string_view location)
             return MakeError(ErrorCode::invalid_argument, "Context handle is empty");
         }
 
-        auto store_result = internal::OpenStore(location, context._impl->store_context);
+        // TensorStore resources are shared by Context, while array handles are scoped to this
+        // Dataset and the Images that retain its Store.
+        auto store_context = context._impl->store_context->CloneForStore();
+        auto store_result = internal::OpenStore(location, std::move(store_context));
         if (!store_result) {
             return store_result.error();
         }

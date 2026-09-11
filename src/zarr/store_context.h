@@ -20,12 +20,17 @@
 
 namespace carta::zarr::internal {
 
-// The resources shared by every read made through one public carta::zarr::Context. Only translation
-// units that talk to TensorStore include this header; store.h forward declares the type so that the
-// schema layer never sees TensorStore.
+// The resources shared by every read made through one public carta::zarr::Context. Array handles
+// are cloned into a per-Store context, so this object retains only shared TensorStore resources.
+// Only translation units that talk to TensorStore include this header; store.h forward declares the
+// type so that the schema layer never sees TensorStore.
 class StoreContext {
 public:
     explicit StoreContext(tensorstore::Context context) : context(std::move(context)) {}
+
+    // Make a context for one Dataset/Store. The TensorStore resource handles remain shared, while
+    // the array-handle table has the same lifetime as that store rather than the public Context.
+    StoreContextPtr CloneForStore() const;
 
     /**
      * Open an array once and hand back the same handle afterwards.
