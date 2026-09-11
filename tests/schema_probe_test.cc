@@ -357,6 +357,20 @@ void TestMetadataCache(const std::filesystem::path& root) {
             "metadata cache did not preserve the discovered node list");
 }
 
+void TestDiscoveryDoesNotDescendIntoArrayChunks(const std::filesystem::path& root) {
+    CreateValidStore(root);
+    // A chunk directory may contain arbitrary files, including a misleading zarr.json. It must
+    // not be treated as a child Zarr node once the parent has been identified as an array.
+    Write(root / "SKY" / "c" / "0" / "zarr.json", SkyArray());
+
+    const auto context = carta::zarr::Context::Create();
+    Require(static_cast<bool>(context), "Context::Create failed for chunk traversal test");
+    const auto dataset = carta::zarr::Dataset::Open(context.value(), root.string());
+    Require(static_cast<bool>(dataset), "Dataset::Open failed for chunk traversal test");
+    Require(dataset.value().descriptor().image_ids == std::vector<std::string>{"SKY"},
+            "discovery descended into an array's chunk directory");
+}
+
 void TestCoordinateCompletion(const std::filesystem::path& root) {
     CreateValidStore(root / "uniform");
     Write(root / "uniform" / "frequency" / "zarr.json",
@@ -671,6 +685,7 @@ int main() {
         TestAmbiguousPixelMask(root / "ambiguous-mask");
         TestDiscoveryIgnoresNameAllowlist(root / "unlisted-image");
         TestMetadataCache(root / "metadata-cache");
+        TestDiscoveryDoesNotDescendIntoArrayChunks(root / "array-chunks");
         TestImageDatasetWithoutSky(root / "image-no-sky");
         TestImageDatasetMissingTimeCoordinate(root / "image-no-time");
         TestShardedStorageLayout(root / "sharded");

@@ -6,6 +6,8 @@
 
 #include "transport.h"
 
+#include <nlohmann/json.hpp>
+
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -80,18 +82,59 @@ public:
                 return MakeError(ErrorCode::io_error, "Unable to enumerate Zarr metadata: " + error.message(),
                                  _root.string());
             }
-            if (!iterator->is_regular_file(error) || error || iterator->path().filename() != "zarr.json") {
+
+            const auto path = iterator->path();
+            if (!iterator->is_directory(error)) {
+                if (error) {
+                    continue;
+                }
+                if (!iterator->is_regular_file(error) || error || path.filename() != "zarr.json") {
+                    continue;
+                }
+            } else if (error) {
                 continue;
             }
-            const auto relative_parent = std::filesystem::relative(iterator->path().parent_path(), _root, error);
+
+            const auto metadata_path = iterator->is_directory() ? path / "zarr.json" : path;
+            std::error_code metadata_error;
+            if (iterator->is_directory() && !std::filesystem::is_regular_file(metadata_path, metadata_error)) {
+                if (metadata_error) {
+                    continue;
+                }
+                continue;
+            }
+
+            const auto relative_parent = std::filesystem::relative(
+                iterator->is_directory() ? path : path.parent_path(), _root, error);
             if (error) {
                 return MakeError(ErrorCode::io_error, "Unable to enumerate Zarr metadata: " + error.message(),
-                                 iterator->path().string());
+                                 path.string());
             }
             if (relative_parent.empty() || relative_parent == ".") {
+                if (iterator->is_directory()) {
+                    iterator.disable_recursion_pending();
+                }
                 continue;
             }
             nodes.push_back(relative_parent.generic_string());
+
+            // Array chunks are descendants of the array node, but are not Zarr nodes. Inspect only
+            // the small node header to avoid walking millions of chunk files. Malformed metadata is
+            // left for Store::ReadNodeMetadata to diagnose; in that case traversal remains conservative.
+            if (iterator->is_directory()) {
+                std::ifstream input(metadata_path);
+                nlohmann::json metadata;
+                if (input.is_open()) {
+                    try {
+                        input >> metadata;
+                        if (metadata.is_object() && metadata.value("node_type", "") == "array") {
+                            iterator.disable_recursion_pending();
+                        }
+                    } catch (const std::exception&) {
+                        // The metadata parser above the transport seam reports the definitive error.
+                    }
+                }
+            }
         }
         if (error) {
             return MakeError(ErrorCode::io_error, "Unable to enumerate Zarr metadata: " + error.message(),
