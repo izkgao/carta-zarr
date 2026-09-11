@@ -134,7 +134,8 @@ struct Collected {
     }
 };
 
-Collected Collect(const carta::zarr::Image& sky, const carta::zarr::SpectralReduceRequest& request) {
+Collected Collect(const carta::zarr::Image& sky, const carta::zarr::SpectralReduceRequest& request,
+                  const carta::zarr::ReadOptions& options) {
     Collected collected;
     collected.region_count = request.region_count;
     collected.channel_count = static_cast<std::size_t>(request.spectral.count);
@@ -162,11 +163,15 @@ Collected Collect(const carta::zarr::Image& sky, const carta::zarr::SpectralRedu
             }
         }
         return true;
-    });
+    }, options);
     Require(static_cast<bool>(result),
             std::string("the reduction failed: ") + (result.has_value() ? "" : result.error().message));
     Require(next_channel == request.spectral.count, "the blocks should cover the whole spectral selection");
     return collected;
+}
+
+Collected Collect(const carta::zarr::Image& sky, const carta::zarr::SpectralReduceRequest& request) {
+    return Collect(sky, request, carta::zarr::ReadOptions{});
 }
 
 void CheckAgainstOracle(const Collected& collected, const std::vector<carta::zarr::RegionMask>& regions,
@@ -295,12 +300,39 @@ void TestEmitGranularityIsReported(const carta::zarr::Image& sky) {
 
     auto whole = WholeSpectrum(regions, 0);
     const auto in_one_block = Collect(sky, whole);
-    Require(in_one_block.block_lengths.size() == 1, "no hint should produce a single block");
+    Require(in_one_block.block_lengths.size() == 1,
+            "this whole fixture costs far less than one read budget, so the library should see no "
+            "reason to split it");
     for (std::uint64_t f = 0; f < kFrequency; ++f) {
         RequireClose(collected.At(0, carta::zarr::Statistic::sum, f),
                      in_one_block.At(0, carta::zarr::Statistic::sum, f),
                      "streaming should not change the answer");
     }
+}
+
+// Without a hint the library emits once per budget of decoded chunk data. A region big enough to
+// spend the whole budget on one spectral layer therefore reports a layer at a time, which is the
+// case that matters: on a real image that is the difference between a partial profile every 70 ms
+// and one silent block lasting minutes.
+void TestABigRegionIsEmittedALayerAtATime(const carta::zarr::Image& sky) {
+    const std::vector<carta::zarr::RegionMask> regions{{0, 0, kL, kM, nullptr}};
+    const auto& chunk = sky.chunk_geometry().chunk_shape;
+    Require(chunk.at(2) == 1,
+            "this test assumes the fixture's frequency chunk is one channel deep, so that a layer "
+            "is a channel and the block count can be predicted");
+
+    carta::zarr::ReadOptions options;
+    // The plane is two chunks of forty bytes, doubled because the mask is read alongside: one
+    // budget buys exactly one layer.
+    options.temporary_memory_limit_bytes = 2 * 40 * 2;
+    const auto collected = Collect(sky, WholeSpectrum(regions, 0), options);
+    Require(collected.block_lengths.size() == kFrequency,
+            "a budget worth one layer should emit one layer per block; if the fixture's chunk shape "
+            "changed, this limit no longer matches a layer and the test stops testing the split");
+    for (const auto length : collected.block_lengths) {
+        Require(length == 1, "each block should carry the single channel its layer holds");
+    }
+    CheckAgainstOracle(collected, regions, 0, "layer at a time");
 }
 
 void TestSinkCancels(const carta::zarr::Image& sky) {
@@ -365,6 +397,7 @@ int main() {
         TestOnlyRequestedStatisticsAreReported(sky);
         TestStrideSelectsChannels(sky);
         TestEmitGranularityIsReported(sky);
+    TestABigRegionIsEmittedALayerAtATime(sky);
         TestSinkCancels(sky);
         TestRejectedRequests(sky);
     } catch (const std::exception& error) {

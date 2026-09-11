@@ -352,17 +352,6 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
     const auto& buckets = buckets_result.value();
     const auto runs_per_row = BuildColumnRuns(buckets);
 
-    // How many channels one emitted block may hold. The hint is the caller's, the budget is the
-    // library's and the chunk alignment is the walk's; the smallest wins, and the block reports
-    // what it used.
-    const std::size_t bytes_per_channel = request.region_count * statistic_count * sizeof(double);
-    const std::uint64_t budget_channels =
-        std::max<std::uint64_t>(1, kSpectralEmitBudgetBytes / std::max<std::size_t>(1, bytes_per_channel));
-    std::uint64_t wanted_channels = request.emit_every_channels == 0
-                                        ? spectral.count
-                                        : std::min<std::uint64_t>(request.emit_every_channels, spectral.count);
-    wanted_channels = std::min(wanted_channels, budget_channels);
-
     const bool apply_mask = options.apply_pixel_mask && descriptor.has_pixel_mask;
     const std::size_t slab_budget_bytes =
         options.temporary_memory_limit_bytes != 0 ? options.temporary_memory_limit_bytes : kDecodedBytesPerRead;
@@ -373,6 +362,39 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
     // The smallest slab that still decodes each spectral chunk once. Reading fewer channels than
     // this would decode a chunk and use part of it, then decode it again for the rest.
     const std::uint64_t least_channels = ((chunk_depth + spectral.stride - 1) / spectral.stride);
+
+    // The chunks one spectral layer of the whole region set occupies.
+    std::uint64_t layer_chunks = 0;
+    for (const auto& runs : runs_per_row) {
+        for (const auto& run : runs) {
+            layer_chunks += run.last - run.first + 1;
+        }
+    }
+
+    // How many channels one emitted block may hold. The hint is the caller's, the budgets are the
+    // library's and the chunk alignment is the walk's; the smallest wins, and the block reports
+    // what it used.
+    //
+    // Without a hint a block costs one budget of decoded bytes, the same invariant a piece of Read
+    // carries, which is why it is free: the block spends whatever the spatial walk left over. A
+    // small region leaves almost all of it, so the block spans many chunks along the spectrum. A
+    // region covering the image spends the budget spatially, `spectral_chunks` below collapses to
+    // one, and the block becomes the single chunk layer the walk is already reading -- the results
+    // are handed over a layer at a time because that is when they are finished, not sooner.
+    //
+    // Emitting only at the end instead, which is what a zero used to mean, is silent for as long as
+    // the whole reduction takes. One layer of a 7763x4742 image is 160 MiB and 70 ms; a thousand
+    // channels of it is a minute of work with no partial answer and nowhere to cancel.
+    const std::size_t bytes_per_channel = request.region_count * statistic_count * sizeof(double);
+    const std::uint64_t budget_channels =
+        std::max<std::uint64_t>(1, kSpectralEmitBudgetBytes / std::max<std::size_t>(1, bytes_per_channel));
+    const std::uint64_t block_chunks = std::min(
+        spectral.count,
+        std::max<std::uint64_t>(1, slab_budget_bytes / std::max<std::uint64_t>(1, layer_chunks * chunk_bytes)));
+    const std::uint64_t wanted_channels =
+        std::min({request.emit_every_channels == 0 ? block_chunks * least_channels
+                                                   : static_cast<std::uint64_t>(request.emit_every_channels),
+                  budget_channels, spectral.count});
 
     const auto rank = descriptor.axes.size();
     std::vector<double> accumulator;

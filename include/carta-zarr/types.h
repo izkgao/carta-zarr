@@ -358,11 +358,16 @@ struct SpectralReduceRequest {
     const RegionMask* regions = nullptr;
     std::size_t region_count = 0;
     StatisticSet statistics = 0;
-    // How often to hand results back, as a hint rather than a contract. Zero asks for one block at
-    // the end. The library lowers it to fit kSpectralEmitBudgetBytes and then to a whole number of
+    // How often to hand results back, as a hint rather than a contract. Zero lets the library
+    // choose, which is what most callers want: it emits as often as it can without making the reads
+    // any smaller, so a region covering the image reports a chunk layer at a time while a
+    // cursor-sized one reports far less often, and neither pays for the difference.
+    //
+    // The library lowers a hint to fit kSpectralEmitBudgetBytes and then to a whole number of
     // spectral chunks, because a block boundary inside a chunk would split one decode's results
-    // across two blocks. The value actually used is reported as SpectralBlock::channel_count, which
-    // a caller has to read anyway.
+    // across two blocks. A caller that wants the whole reduction in one block asks for
+    // SpectralReduceRequest::spectral.count. The value actually used is reported as
+    // SpectralBlock::channel_count, which a caller has to read anyway.
     std::uint32_t emit_every_channels = 0;
 };
 
