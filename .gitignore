@@ -73,3 +73,17 @@ __pycache__/
 # Fixtures under tests/data/ are committed on purpose: the C++ suite must run without a Python
 # toolchain, and the conformance fixture is the record of what XRADIO actually writes. Only the
 # intermediate FITS the conformance generator writes is transient, and it deletes that itself.
+
+AGENTS.md
+
+# Working documents stay local. The ADRs, the design draft and the compatibility baseline are the
+# record a reader of this repository needs; the rest are research drafts, a measurement log and a
+# rendered atlas, none of them finished and none of them in the project's language.
+docs/implementation-plan.md
+docs/read-api.md
+docs/sidecar.md
+docs/architecture.html
+docs/*.xlsx
+
+# An unreferenced schema spreadsheet kept for reference while the XRADIO layout is still moving.
+Image Data Schema.xlsx
