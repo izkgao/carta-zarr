@@ -252,6 +252,20 @@ struct ReadRequest {
     DataType output_type = DataType::float32;
 };
 
+// What a read should do with the decoded-chunk cache.
+//
+// A scan over a cube touches every chunk once and reuses none of them, so caching what it decodes
+// evicts an interactive working set to no purpose -- and rebuilding that working set costs
+// decompression, which is the resource the scan is already saturating. `bypass` runs the read
+// against a cache pool of zero bytes, leaving the shared one alone.
+//
+// Arrays are opened per pool, so the first bypassed read of an array pays to open it again. That is
+// once per array, against a scan that reads all of it.
+enum class CachePolicy {
+    inherit,
+    bypass,
+};
+
 struct ReadOptions {
     // Write NaN wherever the pixel mask is false, so that one call answers what would otherwise be
     // a pixel read plus a mask read. On by default: masking during the read costs one pass over
@@ -292,6 +306,8 @@ struct ReadOptions {
     // the ratio, and refusing to reduce would be the worse answer. ChunkGeometry::chunk_shape says
     // in advance when that will happen.
     std::size_t temporary_memory_limit_bytes = 0;
+    // Whether this read may put what it decodes in the shared cache. See CachePolicy.
+    CachePolicy cache_policy = CachePolicy::inherit;
 };
 
 struct MutableBufferView {

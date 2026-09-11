@@ -14,6 +14,7 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -24,7 +25,7 @@ namespace carta::zarr::internal {
 // are cloned into a per-Store context, so this object retains only shared TensorStore resources.
 // Only translation units that talk to TensorStore include this header; store.h forward declares the
 // type so that the schema layer never sees TensorStore.
-class StoreContext {
+class StoreContext : public std::enable_shared_from_this<StoreContext> {
 public:
     explicit StoreContext(tensorstore::Context context) : context(std::move(context)) {}
 
@@ -46,11 +47,25 @@ public:
     Result<tensorstore::TensorStore<>> OpenArray(const std::filesystem::path& array_path,
                                                  std::string_view node) const;
 
+    /**
+     * The same resources with a cache pool of zero bytes.
+     *
+     * A child context, so the thread pools are the shared ones -- a scan that ran on its own
+     * threads would compete with the session rather than take its turn.
+     *
+     * It keeps its own array table because a handle carries the pool it was opened against, so a
+     * bypassed read cannot reuse one opened with the shared pool. Built once and kept, since the
+     * scans that want it are long and there are few of them.
+     */
+    StoreContextPtr WithoutCache() const;
+
     tensorstore::Context context;
 
 private:
     mutable std::mutex _arrays_mutex;
     mutable std::map<std::string, tensorstore::TensorStore<>> _arrays;
+    mutable std::mutex _without_cache_mutex;
+    mutable StoreContextPtr _without_cache;
 };
 
 // Translate the public options into TensorStore context resources. Positive limits are written

@@ -54,6 +54,25 @@ Result<tensorstore::TensorStore<>> StoreContext::OpenArray(const std::filesystem
     return _arrays.emplace(key, std::move(opened).value()).first->second;
 }
 
+StoreContextPtr StoreContext::WithoutCache() const {
+    std::scoped_lock lock(_without_cache_mutex);
+    if (_without_cache) {
+        return _without_cache;
+    }
+    nlohmann::json spec = nlohmann::json::object();
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+    spec["cache_pool"] = {{"total_bytes_limit", 0}};
+    auto child = tensorstore::Context::FromJson(std::move(spec), context);
+    if (!child.ok()) {
+        // Nothing here can fail that is not a programming error, and a read that cannot bypass the
+        // cache is better served with it than refused.
+        _without_cache = shared_from_this();
+        return _without_cache;
+    }
+    _without_cache = std::make_shared<const StoreContext>(std::move(child.value()));
+    return _without_cache;
+}
+
 Result<StoreContextPtr> MakeStoreContext(const OpenOptions& options) {
     nlohmann::json spec = nlohmann::json::object();
     if (options.cache_bytes > 0) {
