@@ -364,28 +364,44 @@ struct Runs {
     std::vector<std::uint64_t> offsets;
 };
 
-Runs RunsOf(const std::vector<std::uint8_t>& raster, std::uint64_t width, std::uint64_t height) {
+// `along_y` walks columns instead of rows, which is what an image whose store varies fastest along
+// m needs: the runs have to lie along the axis the pixels are contiguous in.
+Runs RunsOf(const std::vector<std::uint8_t>& raster, std::uint64_t width, std::uint64_t height, bool along_y) {
+    const std::uint64_t outer = along_y ? width : height;
+    const std::uint64_t inner = along_y ? height : width;
+    const auto at = [&](std::uint64_t o, std::uint64_t i) {
+        const auto x = along_y ? o : i;
+        const auto y = along_y ? i : o;
+        return raster.at(static_cast<std::size_t>((y * width) + x));
+    };
     Runs out;
     out.offsets.push_back(0);
-    for (std::uint64_t y = 0; y < height; ++y) {
-        std::uint64_t x = 0;
-        while (x < width) {
-            while (x < width && raster.at(static_cast<std::size_t>((y * width) + x)) == 0) {
-                ++x;
+    for (std::uint64_t o = 0; o < outer; ++o) {
+        std::uint64_t i = 0;
+        while (i < inner) {
+            while (i < inner && at(o, i) == 0) {
+                ++i;
             }
-            if (x == width) {
+            if (i == inner) {
                 break;
             }
-            const auto begin = static_cast<std::uint32_t>(x);
-            while (x < width && raster.at(static_cast<std::size_t>((y * width) + x)) != 0) {
-                ++x;
+            const auto begin = static_cast<std::uint32_t>(i);
+            while (i < inner && at(o, i) != 0) {
+                ++i;
             }
             out.runs.push_back(begin);
-            out.runs.push_back(static_cast<std::uint32_t>(x));
+            out.runs.push_back(static_cast<std::uint32_t>(i));
         }
         out.offsets.push_back(out.runs.size() / 2);
     }
     return out;
+}
+
+// Fill in a region's runs the way the image requires them.
+void Attach(carta::zarr::RegionMask& region, const Runs& runs, carta::zarr::AxisRole axis) {
+    region.row_runs = runs.runs.data();
+    region.row_run_offsets = runs.offsets.data();
+    region.run_axis = axis;
 }
 
 // Runs are the selection when they are given, and they have to select what the raster would. The
@@ -395,21 +411,28 @@ Runs RunsOf(const std::vector<std::uint8_t>& raster, std::uint64_t width, std::u
 void TestRunsSelectTheSamePixelsAsTheRaster(const carta::zarr::Image& sky) {
     std::vector<std::uint8_t> raster(static_cast<std::size_t>(kL) * static_cast<std::size_t>(kM), 0);
     for (std::uint64_t y = 0; y < kM; ++y) {
-        if (y == 2) {
-            continue;  // an empty row
-        }
         for (std::uint64_t x = 0; x < kL; ++x) {
-            raster.at(static_cast<std::size_t>((y * kL) + x)) = ((x + (2 * y)) % 3) != 0 ? 1 : 0;
+            // Row 2 and column 1 are cleared so that whichever way the runs have to lie, one of
+            // them is empty.
+            const bool set = y != 2 && x != 1 && ((x + (2 * y)) % 3) != 0;
+            raster.at(static_cast<std::size_t>((y * kL) + x)) = set ? 1 : 0;
         }
     }
-    const auto runs = RunsOf(raster, kL, kM);
-    Require(runs.offsets.at(3) == runs.offsets.at(2), "row 2 should have no runs");
-    Require(runs.offsets.at(2) - runs.offsets.at(1) == 2, "row 1 should be two runs with a hole");
+    const auto axis = sky.chunk_geometry().fastest_spatial_axis;
+    const auto runs = RunsOf(raster, kL, kM, axis == carta::zarr::AxisRole::spatial_y);
+    std::size_t empty_rows = 0;
+    std::size_t split_rows = 0;
+    for (std::size_t r = 0; r + 1 < runs.offsets.size(); ++r) {
+        const auto count = runs.offsets.at(r + 1) - runs.offsets.at(r);
+        empty_rows += count == 0 ? 1 : 0;
+        split_rows += count > 1 ? 1 : 0;
+    }
+    Require(empty_rows > 0, "the pattern should leave one line of the region empty");
+    Require(split_rows > 0, "the pattern should leave one line split by a hole");
 
     const std::vector<carta::zarr::RegionMask> by_raster{{0, 0, kL, kM, raster.data()}};
     std::vector<carta::zarr::RegionMask> by_runs{{0, 0, kL, kM, nullptr}};
-    by_runs.at(0).row_runs = runs.runs.data();
-    by_runs.at(0).row_run_offsets = runs.offsets.data();
+    Attach(by_runs.at(0), runs, axis);
 
     const auto from_raster = Collect(sky, WholeSpectrum(by_raster, 0));
     const auto from_runs = Collect(sky, WholeSpectrum(by_runs, 0));
@@ -429,10 +452,10 @@ void TestRunsNarrowTheChunksTheWalkReads(const carta::zarr::Image& sky) {
             raster.at(static_cast<std::size_t>((y * kL) + x)) = 1;
         }
     }
-    const auto runs = RunsOf(raster, kL, kM);
+    const auto axis = sky.chunk_geometry().fastest_spatial_axis;
+    const auto runs = RunsOf(raster, kL, kM, axis == carta::zarr::AxisRole::spatial_y);
     std::vector<carta::zarr::RegionMask> regions{{0, 0, kL, kM, nullptr}};
-    regions.at(0).row_runs = runs.runs.data();
-    regions.at(0).row_run_offsets = runs.offsets.data();
+    Attach(regions.at(0), runs, axis);
 
     carta::zarr::ReadOptions options;
     options.temporary_memory_limit_bytes = 40;  // one chunk of the fixture

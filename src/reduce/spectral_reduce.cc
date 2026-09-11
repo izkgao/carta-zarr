@@ -73,46 +73,64 @@ Result<AxisMap> MapAxes(const ImageDescriptor& descriptor) {
     return map;
 }
 
+// One region as the walk sees it: u is the spatial axis the store varies fastest and v is the other,
+// so that a plane arrives with u contiguous and never has to be transposed on the way in. A caller's
+// x and y are mapped onto these once, at the top of the reduction.
+struct WalkRegion {
+    std::uint64_t u_start = 0;
+    std::uint64_t v_start = 0;
+    std::uint64_t u_size = 0;
+    std::uint64_t v_size = 0;
+    // Steps through the raster for one pixel of u and of v. One of them is 1; which one depends on
+    // whether the caller's rows run along u or across it.
+    const std::uint8_t* mask = nullptr;
+    std::uint64_t mask_u_stride = 1;
+    std::uint64_t mask_v_stride = 1;
+    // Runs along u, indexed by v. Only accepted when the caller's runs already run this way.
+    const std::uint32_t* runs = nullptr;
+    const std::uint64_t* run_offsets = nullptr;
+};
+
 // Regions indexed by the chunks they touch, in compressed-row form over the bounding box's chunk
 // grid. Without it the walk is chunks x regions intersection tests -- 6.5 x 10^8 for a WSU
 // diagonal -- which would put the region count back on the critical path this API exists to clear.
 struct ChunkBuckets {
-    // The union bounding box of every region, in pixels.
-    std::uint64_t x0 = 0;
-    std::uint64_t y0 = 0;
-    std::uint64_t x1 = 0;
-    std::uint64_t y1 = 0;
+    // The union bounding box of every region, in pixels of the walk's own axes.
+    std::uint64_t u0 = 0;
+    std::uint64_t v0 = 0;
+    std::uint64_t u1 = 0;
+    std::uint64_t v1 = 0;
     // The chunk grid covering that box.
-    std::uint64_t chunk_x0 = 0;
-    std::uint64_t chunk_y0 = 0;
+    std::uint64_t chunk_cu0 = 0;
+    std::uint64_t chunk_cv0 = 0;
     std::uint64_t columns = 0;
     std::uint64_t rows = 0;
     std::vector<std::uint64_t> offsets;
     std::vector<std::uint32_t> entries;
 
-    std::size_t Cell(std::uint64_t chunk_x, std::uint64_t chunk_y) const {
-        return static_cast<std::size_t>(((chunk_y - chunk_y0) * columns) + (chunk_x - chunk_x0));
+    std::size_t Cell(std::uint64_t chunk_cu, std::uint64_t chunk_cv) const {
+        return static_cast<std::size_t>(((chunk_cv - chunk_cv0) * columns) + (chunk_cu - chunk_cu0));
     }
 };
 
-Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t region_count,
-                                       std::uint64_t chunk_width, std::uint64_t chunk_height,
+Result<ChunkBuckets> BuildChunkBuckets(const WalkRegion* regions, std::size_t region_count,
+                                       std::uint64_t chunk_u, std::uint64_t chunk_v,
                                        const std::string& node) {
     ChunkBuckets buckets;
-    buckets.x0 = std::numeric_limits<std::uint64_t>::max();
-    buckets.y0 = std::numeric_limits<std::uint64_t>::max();
+    buckets.u0 = std::numeric_limits<std::uint64_t>::max();
+    buckets.v0 = std::numeric_limits<std::uint64_t>::max();
     for (std::size_t i = 0; i < region_count; ++i) {
         const auto& region = regions[i];
-        buckets.x0 = std::min(buckets.x0, region.x_start);
-        buckets.y0 = std::min(buckets.y0, region.y_start);
-        buckets.x1 = std::max(buckets.x1, region.x_start + region.width);
-        buckets.y1 = std::max(buckets.y1, region.y_start + region.height);
+        buckets.u0 = std::min(buckets.u0, region.u_start);
+        buckets.v0 = std::min(buckets.v0, region.v_start);
+        buckets.u1 = std::max(buckets.u1, region.u_start + region.u_size);
+        buckets.v1 = std::max(buckets.v1, region.v_start + region.v_size);
     }
 
-    buckets.chunk_x0 = buckets.x0 / chunk_width;
-    buckets.chunk_y0 = buckets.y0 / chunk_height;
-    buckets.columns = ((buckets.x1 - 1) / chunk_width) - buckets.chunk_x0 + 1;
-    buckets.rows = ((buckets.y1 - 1) / chunk_height) - buckets.chunk_y0 + 1;
+    buckets.chunk_cu0 = buckets.u0 / chunk_u;
+    buckets.chunk_cv0 = buckets.v0 / chunk_v;
+    buckets.columns = ((buckets.u1 - 1) / chunk_u) - buckets.chunk_cu0 + 1;
+    buckets.rows = ((buckets.v1 - 1) / chunk_v) - buckets.chunk_cv0 + 1;
 
     const auto cells = static_cast<std::size_t>(buckets.columns * buckets.rows);
     if (cells > std::numeric_limits<std::uint32_t>::max()) {
@@ -122,12 +140,12 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
     buckets.offsets.assign(cells + 1, 0);
 
     // The chunk span of one region's bounding box.
-    const auto span = [&](const RegionMask& region, std::uint64_t& cx0, std::uint64_t& cx1, std::uint64_t& cy0,
+    const auto span = [&](const WalkRegion& region, std::uint64_t& cx0, std::uint64_t& cx1, std::uint64_t& cy0,
                           std::uint64_t& cy1) {
-        cx0 = region.x_start / chunk_width;
-        cx1 = (region.x_start + region.width - 1) / chunk_width;
-        cy0 = region.y_start / chunk_height;
-        cy1 = (region.y_start + region.height - 1) / chunk_height;
+        cx0 = region.u_start / chunk_u;
+        cx1 = (region.u_start + region.u_size - 1) / chunk_u;
+        cy0 = region.v_start / chunk_v;
+        cy1 = (region.v_start + region.v_size - 1) / chunk_v;
     };
 
     // The chunks a region actually occupies, which is not the same as the chunks its bounding box
@@ -138,10 +156,10 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
     //
     // A null mask means the whole bounding box, so there is nothing to narrow and nothing to scan.
     std::vector<std::uint8_t> occupied;
-    const auto for_each_cell = [&](const RegionMask& region, auto&& visit) {
+    const auto for_each_cell = [&](const WalkRegion& region, auto&& visit) {
         std::uint64_t cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
         span(region, cx0, cx1, cy0, cy1);
-        if (region.row_runs == nullptr && region.mask == nullptr) {
+        if (region.runs == nullptr && region.mask == nullptr) {
             for (auto cy = cy0; cy <= cy1; ++cy) {
                 for (auto cx = cx0; cx <= cx1; ++cx) {
                     visit(cx, cy);
@@ -158,23 +176,23 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
             }
         };
 
-        if (region.row_runs != nullptr) {
+        if (region.runs != nullptr) {
             const std::uint64_t columns = cx1 - cx0 + 1;
             occupied.assign(static_cast<std::size_t>(columns), 0);
             for (auto cy = cy0; cy <= cy1; ++cy) {
                 std::fill(occupied.begin(), occupied.end(), std::uint8_t{0});
                 std::uint64_t found = 0;
-                const std::uint64_t y_first = std::max(region.y_start, cy * chunk_height);
-                const std::uint64_t y_last = std::min(region.y_start + region.height, (cy + 1) * chunk_height);
+                const std::uint64_t y_first = std::max(region.v_start, cy * chunk_v);
+                const std::uint64_t y_last = std::min(region.v_start + region.v_size, (cy + 1) * chunk_v);
                 for (std::uint64_t y = y_first; y < y_last && found < columns; ++y) {
-                    const auto r = static_cast<std::size_t>(y - region.y_start);
-                    for (auto k = region.row_run_offsets[r]; k < region.row_run_offsets[r + 1]; ++k) {
-                        const std::uint64_t run_begin = region.x_start + region.row_runs[2 * k];
-                        const std::uint64_t run_end = region.x_start + region.row_runs[(2 * k) + 1];
+                    const auto r = static_cast<std::size_t>(y - region.v_start);
+                    for (auto k = region.run_offsets[r]; k < region.run_offsets[r + 1]; ++k) {
+                        const std::uint64_t run_begin = region.u_start + region.runs[2 * k];
+                        const std::uint64_t run_end = region.u_start + region.runs[(2 * k) + 1];
                         if (run_begin >= run_end) {
                             continue;
                         }
-                        for (auto column = run_begin / chunk_width; column <= (run_end - 1) / chunk_width;
+                        for (auto column = run_begin / chunk_u; column <= (run_end - 1) / chunk_u;
                              ++column) {
                             auto& seen = occupied.at(static_cast<std::size_t>(column - cx0));
                             if (seen == 0) {
@@ -190,23 +208,23 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
         }
 
         const std::uint64_t columns = cx1 - cx0 + 1;
-        const std::uint64_t x_end = region.x_start + region.width;
+        const std::uint64_t u_end = region.u_start + region.u_size;
         occupied.assign(static_cast<std::size_t>(columns), 0);
         for (auto cy = cy0; cy <= cy1; ++cy) {
             std::fill(occupied.begin(), occupied.end(), std::uint8_t{0});
             std::uint64_t found = 0;
-            const std::uint64_t y_first = std::max(region.y_start, cy * chunk_height);
-            const std::uint64_t y_last = std::min(region.y_start + region.height, (cy + 1) * chunk_height);
+            const std::uint64_t y_first = std::max(region.v_start, cy * chunk_v);
+            const std::uint64_t y_last = std::min(region.v_start + region.v_size, (cy + 1) * chunk_v);
             for (std::uint64_t y = y_first; y < y_last && found < columns; ++y) {
-                const std::uint8_t* row = region.mask + ((y - region.y_start) * region.width);
-                std::uint64_t x = region.x_start;
-                while (x < x_end) {
-                    const std::uint64_t column = x / chunk_width;
-                    const std::uint64_t boundary = std::min(x_end, (column + 1) * chunk_width);
+                const std::uint8_t* row = region.mask + ((y - region.v_start) * region.mask_v_stride);
+                std::uint64_t x = region.u_start;
+                while (x < u_end) {
+                    const std::uint64_t column = x / chunk_u;
+                    const std::uint64_t boundary = std::min(u_end, (column + 1) * chunk_u);
                     auto& seen = occupied.at(static_cast<std::size_t>(column - cx0));
                     if (seen == 0) {
                         for (std::uint64_t k = x; k < boundary; ++k) {
-                            if (row[k - region.x_start] != 0) {
+                            if (row[(k - region.u_start) * region.mask_u_stride] != 0) {
                                 seen = 1;
                                 ++found;
                                 break;
@@ -255,7 +273,7 @@ Result<ChunkBuckets> BuildChunkBuckets(const RegionMask* regions, std::size_t re
 }
 
 Result<void> ValidateRequest(const ImageDescriptor& descriptor, const AxisMap& axes,
-                             const SpectralReduceRequest& request) {
+                             const SpectralReduceRequest& request, AxisRole fastest_spatial_axis) {
     const auto& node = descriptor.id;
     if (request.region_count == 0 || request.regions == nullptr) {
         return MakeError(ErrorCode::invalid_argument, "A spectral reduction needs at least one region", node);
@@ -281,6 +299,20 @@ Result<void> ValidateRequest(const ImageDescriptor& descriptor, const AxisMap& a
             region.height > height - region.y_start) {
             return MakeError(ErrorCode::invalid_argument,
                              "Region " + std::to_string(i) + " falls outside the image", node);
+        }
+        // Runs are worth taking because their pixels are contiguous in the destination, and they
+        // are contiguous only along the axis the store varies fastest. Reading them with a stride
+        // would be slower than the raster they replaced, so this is refused rather than absorbed.
+        if (region.row_runs != nullptr && region.run_axis != fastest_spatial_axis) {
+            return MakeError(ErrorCode::invalid_argument,
+                             "Region " + std::to_string(i) +
+                                 " supplies runs along the axis this image does not vary fastest; see "
+                                 "ChunkGeometry::fastest_spatial_axis",
+                             node);
+        }
+        if ((region.row_runs == nullptr) != (region.row_run_offsets == nullptr)) {
+            return MakeError(ErrorCode::invalid_argument,
+                             "Region " + std::to_string(i) + " supplies one run array without the other", node);
         }
     }
 
@@ -322,7 +354,7 @@ struct RowTotals {
 // nothing an if would do that arithmetic does not.
 template <bool kUnitStride, bool kMasked>
 void AccumulateRow(const float* row, std::uint64_t stride, std::uint64_t count, const std::uint8_t* selected,
-                   RowTotals& totals) {
+                   std::uint64_t mask_stride, RowTotals& totals) {
     std::uint64_t good = 0;
     std::uint64_t selected_count = 0;
     double sum = 0.0;
@@ -331,7 +363,7 @@ void AccumulateRow(const float* row, std::uint64_t stride, std::uint64_t count, 
     double largest = -kInfinity;
 
     for (std::uint64_t i = 0; i < count; ++i) {
-        if (kMasked && selected[i] == 0) {
+        if (kMasked && selected[i * mask_stride] == 0) {
             continue;
         }
         ++selected_count;
@@ -405,8 +437,35 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
         return axes.error();
     }
     const auto& map = axes.value();
-    if (auto valid = ValidateRequest(descriptor, map, request); !valid) {
+
+    // The walk follows the store. Of the two spatial axes the one written last varies fastest, so
+    // asking for it first is what keeps a plane from being transposed on its way into the
+    // destination; everything below is in terms of that axis (u) and the other one (v).
+    const bool swap_spatial = geometry.fastest_spatial_axis == AxisRole::spatial_y;
+    const auto axis_u = swap_spatial ? map.y : map.x;
+    const auto axis_v = swap_spatial ? map.x : map.y;
+
+    if (auto valid = ValidateRequest(descriptor, map, request, geometry.fastest_spatial_axis); !valid) {
         return valid.error();
+    }
+
+    // The caller's regions in the walk's own axes. The raster keeps whatever order the caller wrote
+    // it in; only the steps through it change.
+    std::vector<WalkRegion> regions;
+    regions.reserve(request.region_count);
+    for (std::size_t i = 0; i < request.region_count; ++i) {
+        const auto& given = request.regions[i];
+        WalkRegion region;
+        region.u_start = swap_spatial ? given.y_start : given.x_start;
+        region.v_start = swap_spatial ? given.x_start : given.y_start;
+        region.u_size = swap_spatial ? given.height : given.width;
+        region.v_size = swap_spatial ? given.width : given.height;
+        region.mask = given.mask;
+        region.mask_u_stride = swap_spatial ? given.width : 1;
+        region.mask_v_stride = swap_spatial ? 1 : given.width;
+        region.runs = given.row_runs;
+        region.run_offsets = given.row_run_offsets;
+        regions.push_back(region);
     }
 
     // The spectral range is checked here as well as inside each slab request, so that a bad range
@@ -436,12 +495,12 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
     const int slot_min = slot_of.at(4);
     const int slot_max = slot_of.at(5);
 
-    const auto chunk_width = std::max<std::uint64_t>(1, geometry.chunk_shape.at(map.x));
-    const auto chunk_height = std::max<std::uint64_t>(1, geometry.chunk_shape.at(map.y));
+    const auto chunk_u = std::max<std::uint64_t>(1, geometry.chunk_shape.at(axis_u));
+    const auto chunk_v = std::max<std::uint64_t>(1, geometry.chunk_shape.at(axis_v));
     const auto chunk_depth = std::max<std::uint64_t>(1, geometry.chunk_shape.at(map.spectral));
 
     auto buckets_result =
-        BuildChunkBuckets(request.regions, request.region_count, chunk_width, chunk_height, node);
+        BuildChunkBuckets(regions.data(), regions.size(), chunk_u, chunk_v, node);
     if (!buckets_result) {
         return buckets_result.error();
     }
@@ -599,10 +658,10 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                 ++band_end;
             }
 
-            const std::uint64_t chunk_y_begin = buckets.chunk_y0 + row;
-            const std::uint64_t chunk_y_end = buckets.chunk_y0 + band_end;
-            const std::uint64_t y_begin = std::max(buckets.y0, chunk_y_begin * chunk_height);
-            const std::uint64_t y_end = std::min(buckets.y1, chunk_y_end * chunk_height);
+            const std::uint64_t chunk_cv_begin = buckets.chunk_cv0 + row;
+            const std::uint64_t chunk_cv_end = buckets.chunk_cv0 + band_end;
+            const std::uint64_t v_begin = std::max(buckets.v0, chunk_cv_begin * chunk_v);
+            const std::uint64_t v_end = std::min(buckets.v1, chunk_cv_end * chunk_v);
 
             // A run wider than the budget is read in pieces, not in one request. Without this the
             // smallest request is a whole chunk row of the region: 157 chunks of a 80000-pixel-wide
@@ -621,10 +680,10 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
             }
 
             for (const auto& run : segments) {
-                const std::uint64_t chunk_x_begin = buckets.chunk_x0 + run.first;
-                const std::uint64_t chunk_x_end = buckets.chunk_x0 + run.last + 1;
-                const std::uint64_t x_begin = std::max(buckets.x0, chunk_x_begin * chunk_width);
-                const std::uint64_t x_end = std::min(buckets.x1, chunk_x_end * chunk_width);
+                const std::uint64_t chunk_cu_begin = buckets.chunk_cu0 + run.first;
+                const std::uint64_t chunk_cu_end = buckets.chunk_cu0 + run.last + 1;
+                const std::uint64_t u_begin = std::max(buckets.u0, chunk_cu_begin * chunk_u);
+                const std::uint64_t u_end = std::min(buckets.u1, chunk_cu_end * chunk_u);
                 const std::uint64_t run_chunks =
                     std::max<std::uint64_t>(1, (run.last - run.first + 1) * (band_end - row));
                 const std::uint64_t spectral_chunks =
@@ -652,8 +711,8 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
 
                     ReadRequest read_request;
                     read_request.axes.assign(rank, Range{0, 1, 1});
-                    read_request.axes.at(map.x) = Range{x_begin, x_end - x_begin, 1};
-                    read_request.axes.at(map.y) = Range{y_begin, y_end - y_begin, 1};
+                    read_request.axes.at(axis_u) = Range{u_begin, u_end - u_begin, 1};
+                    read_request.axes.at(axis_v) = Range{v_begin, v_end - v_begin, 1};
                     read_request.axes.at(map.spectral) =
                         Range{spectral.start + (slab_begin * spectral.stride), slab_length, spectral.stride};
                     if (map.has_polarization) {
@@ -668,19 +727,27 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                         return selection.error();
                     }
 
-                    // Destination strides of a densely packed logical read, axis 0 fastest. Derived
-                    // rather than assumed, so the accumulation does not quietly depend on x, y and
-                    // spectral being the first three logical axes.
-                    std::uint64_t stride_x = 0;
-                    std::uint64_t stride_y = 0;
-                    std::uint64_t stride_z = 0;
-                    std::uint64_t running = 1;
+                    // Take the plane in the order the store wrote it. The reader's destination has
+                    // its own dimension 0 fastest, so asking for the stored dimensions reversed is
+                    // asking for no transpose at all: the last stored dimension, the one the array
+                    // is contiguous along, lands fastest. Read hands back logical order because its
+                    // callers want a densely packed image; a reduction wants whatever is cheapest to
+                    // read, and pays for the difference in nothing but these strides.
                     for (std::size_t i = 0; i < rank; ++i) {
-                        if (i == map.x) stride_x = running;
-                        if (i == map.y) stride_y = running;
-                        if (i == map.spectral) stride_z = running;
-                        running *= read_request.axes.at(i).count;
+                        selection.value().logical_to_stored.at(i) = rank - 1 - i;
                     }
+
+                    // Strides of that destination, by stored dimension: the last one steps by 1 and
+                    // each earlier one by the product of those after it.
+                    std::vector<std::uint64_t> stored_stride(rank, 1);
+                    std::uint64_t running = 1;
+                    for (std::size_t stored = rank; stored-- > 0;) {
+                        stored_stride.at(stored) = running;
+                        running *= selection.value().count.at(stored);
+                    }
+                    const std::uint64_t stride_u = stored_stride.at(descriptor.axes.at(axis_u).storage_index);
+                    const std::uint64_t stride_v = stored_stride.at(descriptor.axes.at(axis_v).storage_index);
+                    const std::uint64_t stride_z = stored_stride.at(descriptor.axes.at(map.spectral).storage_index);
                     const auto elements = static_cast<std::size_t>(running);
 
                     pixels.resize(elements);
@@ -710,84 +777,89 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                         const auto out_channel = static_cast<std::size_t>(slab_begin - block_begin + channel);
                         const float* plane = pixels.data() + (channel * stride_z);
 
-                        for (std::uint64_t chunk_y = chunk_y_begin; chunk_y < chunk_y_end; ++chunk_y) {
-                            const std::uint64_t cell_y0 = std::max(y_begin, chunk_y * chunk_height);
-                            const std::uint64_t cell_y1 = std::min(y_end, (chunk_y + 1) * chunk_height);
-                            if (cell_y0 >= cell_y1) {
+                        for (std::uint64_t chunk_cv = chunk_cv_begin; chunk_cv < chunk_cv_end; ++chunk_cv) {
+                            const std::uint64_t cell_v0 = std::max(v_begin, chunk_cv * chunk_v);
+                            const std::uint64_t cell_v1 = std::min(v_end, (chunk_cv + 1) * chunk_v);
+                            if (cell_v0 >= cell_v1) {
                                 continue;
                             }
-                            for (std::uint64_t chunk_x = chunk_x_begin; chunk_x < chunk_x_end; ++chunk_x) {
-                                const std::uint64_t cell_x0 = std::max(x_begin, chunk_x * chunk_width);
-                                const std::uint64_t cell_x1 = std::min(x_end, (chunk_x + 1) * chunk_width);
-                                if (cell_x0 >= cell_x1) {
+                            for (std::uint64_t chunk_cu = chunk_cu_begin; chunk_cu < chunk_cu_end; ++chunk_cu) {
+                                const std::uint64_t cell_u0 = std::max(u_begin, chunk_cu * chunk_u);
+                                const std::uint64_t cell_u1 = std::min(u_end, (chunk_cu + 1) * chunk_u);
+                                if (cell_u0 >= cell_u1) {
                                     continue;
                                 }
 
-                                const auto cell = buckets.Cell(chunk_x, chunk_y);
+                                const auto cell = buckets.Cell(chunk_cu, chunk_cv);
                                 const auto entry_end = buckets.offsets.at(cell + 1);
                                 for (auto entry = buckets.offsets.at(cell); entry < entry_end; ++entry) {
                                     const std::size_t r = buckets.entries.at(static_cast<std::size_t>(entry));
-                                    const auto& region = request.regions[r];
+                                    const auto& region = regions.at(r);
 
-                                    const std::uint64_t rx0 = std::max(cell_x0, region.x_start);
-                                    const std::uint64_t rx1 = std::min(cell_x1, region.x_start + region.width);
-                                    const std::uint64_t ry0 = std::max(cell_y0, region.y_start);
-                                    const std::uint64_t ry1 = std::min(cell_y1, region.y_start + region.height);
-                                    if (rx0 >= rx1 || ry0 >= ry1) {
+                                    const std::uint64_t ru0 = std::max(cell_u0, region.u_start);
+                                    const std::uint64_t ru1 = std::min(cell_u1, region.u_start + region.u_size);
+                                    const std::uint64_t rv0 = std::max(cell_v0, region.v_start);
+                                    const std::uint64_t rv1 = std::min(cell_v1, region.v_start + region.v_size);
+                                    if (ru0 >= ru1 || rv0 >= rv1) {
                                         continue;
                                     }
 
                                     double* out = accumulator.data() + (r * region_stride);
-                                    for (std::uint64_t y = ry0; y < ry1; ++y) {
+                                    for (std::uint64_t y = rv0; y < rv1; ++y) {
                                         RowTotals totals;
-                                        if (region.row_runs != nullptr) {
+                                        if (region.runs != nullptr) {
                                             // Every pixel of a run is selected, so each one goes
                                             // through the same loop an unmasked region uses and the
                                             // per-pixel test never happens.
-                                            const auto r = static_cast<std::size_t>(y - region.y_start);
-                                            for (auto k = region.row_run_offsets[r];
-                                                 k < region.row_run_offsets[r + 1]; ++k) {
+                                            const auto r = static_cast<std::size_t>(y - region.v_start);
+                                            for (auto k = region.run_offsets[r];
+                                                 k < region.run_offsets[r + 1]; ++k) {
                                                 const std::uint64_t run_begin =
-                                                    region.x_start + region.row_runs[2 * k];
-                                                if (run_begin >= rx1) {
+                                                    region.u_start + region.runs[2 * k];
+                                                if (run_begin >= ru1) {
                                                     break;  // runs ascend, so the rest are past the cell
                                                 }
                                                 const std::uint64_t run_end =
-                                                    region.x_start + region.row_runs[(2 * k) + 1];
-                                                const std::uint64_t first = std::max(rx0, run_begin);
-                                                const std::uint64_t last = std::min(rx1, run_end);
+                                                    region.u_start + region.runs[(2 * k) + 1];
+                                                const std::uint64_t first = std::max(ru0, run_begin);
+                                                const std::uint64_t last = std::min(ru1, run_end);
                                                 if (first >= last) {
                                                     continue;
                                                 }
-                                                const float* span = plane + ((y - y_begin) * stride_y) +
-                                                                    ((first - x_begin) * stride_x);
-                                                if (stride_x == 1) {
-                                                    AccumulateRow<true, false>(span, 1, last - first, nullptr,
+                                                const float* span = plane + ((y - v_begin) * stride_v) +
+                                                                    ((first - u_begin) * stride_u);
+                                                if (stride_u == 1) {
+                                                    AccumulateRow<true, false>(span, 1, last - first, nullptr, 1,
                                                                                totals);
                                                 } else {
-                                                    AccumulateRow<false, false>(span, stride_x, last - first,
-                                                                                nullptr, totals);
+                                                    AccumulateRow<false, false>(span, stride_u, last - first,
+                                                                                nullptr, 1, totals);
                                                 }
                                             }
                                         } else {
                                         const float* pixel_row =
-                                            plane + ((y - y_begin) * stride_y) + ((rx0 - x_begin) * stride_x);
+                                            plane + ((y - v_begin) * stride_v) + ((ru0 - u_begin) * stride_u);
                                         const std::uint8_t* selected =
                                             region.mask == nullptr
                                                 ? nullptr
-                                                : region.mask + ((y - region.y_start) * region.width) +
-                                                      (rx0 - region.x_start);
-                                        const std::uint64_t run = rx1 - rx0;
-                                        if (stride_x == 1) {
+                                                : region.mask +
+                                                      ((y - region.v_start) * region.mask_v_stride) +
+                                                      ((ru0 - region.u_start) * region.mask_u_stride);
+                                        const std::uint64_t run = ru1 - ru0;
+                                        const std::uint64_t mask_step = region.mask_u_stride;
+                                        if (stride_u == 1) {
                                             if (selected == nullptr) {
-                                                AccumulateRow<true, false>(pixel_row, 1, run, nullptr, totals);
+                                                AccumulateRow<true, false>(pixel_row, 1, run, nullptr, 1, totals);
                                             } else {
-                                                AccumulateRow<true, true>(pixel_row, 1, run, selected, totals);
+                                                AccumulateRow<true, true>(pixel_row, 1, run, selected, mask_step,
+                                                                          totals);
                                             }
                                         } else if (selected == nullptr) {
-                                            AccumulateRow<false, false>(pixel_row, stride_x, run, nullptr, totals);
+                                            AccumulateRow<false, false>(pixel_row, stride_u, run, nullptr, 1,
+                                                                        totals);
                                         } else {
-                                            AccumulateRow<false, true>(pixel_row, stride_x, run, selected, totals);
+                                            AccumulateRow<false, true>(pixel_row, stride_u, run, selected,
+                                                                       mask_step, totals);
                                         }
                                         }
 

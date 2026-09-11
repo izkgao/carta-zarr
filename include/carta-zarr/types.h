@@ -172,6 +172,16 @@ struct StorageLayout {
 // not sharded, and can differ by a large factor when it is, so a consumer sizing a cache reasons
 // about chunk_shape and one predicting request count reasons about shard_shape.
 struct ChunkGeometry {
+    // The spatial axis the store varies fastest, which is the one a reduction walks along.
+    //
+    // Reading a plane with the other one fastest means transposing every chunk on the way into the
+    // destination, and that is not a rounding error: measured on two stores holding the same
+    // 2048x2048x16 image and differing only in whether l or m is written last, a whole-plane
+    // spectral profile took 172.3 ms against 130.3 with zstd and 139.7 against 94.5 uncompressed.
+    //
+    // So the walk follows the store rather than the other way round, and a region that describes
+    // itself as runs must run them along this axis. See RegionMask::run_axis.
+    AxisRole fastest_spatial_axis = AxisRole::spatial_x;
     std::vector<std::uint64_t> chunk_shape;
     std::vector<std::uint64_t> shard_shape;
     // Number of inner chunks along each axis.
@@ -362,6 +372,17 @@ struct RegionMask {
     // check, which is the whole point of taking them.
     const std::uint32_t* row_runs = nullptr;
     const std::uint64_t* row_run_offsets = nullptr;
+    // Which spatial axis the runs run along, and therefore what "row" means above.
+    //
+    // spatial_x is the ordinary reading: row r is the r-th row of the bounding box and a run is a
+    // range of columns. spatial_y transposes that: row r is the r-th column and a run is a range of
+    // rows.
+    //
+    // It has to be said because it has to match ChunkGeometry::fastest_spatial_axis -- runs are
+    // worth taking because their pixels are contiguous in the destination, and they are only
+    // contiguous along the axis the store varies fastest. A reduction refuses runs along the other
+    // one rather than quietly reading them with a stride.
+    AxisRole run_axis = AxisRole::spatial_x;
 };
 
 // The largest number of regions one reduction accepts.

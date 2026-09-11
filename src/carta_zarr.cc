@@ -194,6 +194,19 @@ ChunkGeometry BuildChunkGeometry(const ImageDescriptor& descriptor, const Storag
             geometry.transpose_required = true;
         }
     }
+
+    // The last stored dimension varies fastest, so of the two spatial axes the one with the larger
+    // storage index is the one a plane is contiguous along.
+    std::size_t x_stored = 0;
+    std::size_t y_stored = 0;
+    for (const auto& axis : descriptor.axes) {
+        if (axis.role == AxisRole::spatial_x) {
+            x_stored = axis.storage_index;
+        } else if (axis.role == AxisRole::spatial_y) {
+            y_stored = axis.storage_index;
+        }
+    }
+    geometry.fastest_spatial_axis = y_stored > x_stored ? AxisRole::spatial_y : AxisRole::spatial_x;
     return geometry;
 }
 
