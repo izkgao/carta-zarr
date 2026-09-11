@@ -253,19 +253,50 @@ struct RowTotals {
     double sum_sq = 0.0;
     double smallest = kInfinity;
     double largest = -kInfinity;
-
-    void Add(double value) {
-        if (std::isfinite(value)) {
-            ++good;
-            sum += value;
-            sum_sq += value * value;
-            smallest = std::min(smallest, value);
-            largest = std::max(largest, value);
-        } else {
-            ++bad;
-        }
-    }
 };
+
+// The per-pixel loop, written so that a compiler can vectorise it.
+//
+// Both template parameters are loop invariants that used to be runtime tests, and each one on its
+// own was enough to stop vectorisation: the x stride is 1 for every image whose fastest logical
+// axis is x, which is every XRADIO image, but the compiler cannot know that and pays a multiply per
+// pixel for the possibility; and a mask that most regions do not have cost a branch per pixel.
+//
+// The finiteness test is branchless for the same reason. A non-finite value contributes zero to the
+// sums and its own identity to the extrema, which is exactly what excluding it means, so there is
+// nothing an if would do that arithmetic does not.
+template <bool kUnitStride, bool kMasked>
+void AccumulateRow(const float* row, std::uint64_t stride, std::uint64_t count, const std::uint8_t* selected,
+                   RowTotals& totals) {
+    std::uint64_t good = 0;
+    std::uint64_t selected_count = 0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    double smallest = kInfinity;
+    double largest = -kInfinity;
+
+    for (std::uint64_t i = 0; i < count; ++i) {
+        if (kMasked && selected[i] == 0) {
+            continue;
+        }
+        ++selected_count;
+        const float value = kUnitStride ? row[i] : row[i * stride];
+        const bool finite = std::isfinite(value);
+        const double clean = finite ? static_cast<double>(value) : 0.0;
+        good += static_cast<std::uint64_t>(finite);
+        sum += clean;
+        sum_sq += clean * clean;
+        smallest = std::min(smallest, finite ? clean : kInfinity);
+        largest = std::max(largest, finite ? clean : -kInfinity);
+    }
+
+    totals.good = good;
+    totals.bad = selected_count - good;
+    totals.sum = sum;
+    totals.sum_sq = sum_sq;
+    totals.smallest = smallest;
+    totals.largest = largest;
+}
 
 // A maximal run of consecutive chunk columns that at least one region touches, in bounding-box
 // grid coordinates.
@@ -542,20 +573,23 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                                     for (std::uint64_t y = ry0; y < ry1; ++y) {
                                         const float* pixel_row =
                                             plane + ((y - y_begin) * stride_y) + ((rx0 - x_begin) * stride_x);
+                                        const std::uint8_t* selected =
+                                            region.mask == nullptr
+                                                ? nullptr
+                                                : region.mask + ((y - region.y_start) * region.width) +
+                                                      (rx0 - region.x_start);
                                         RowTotals totals;
-                                        if (region.mask == nullptr) {
-                                            for (std::uint64_t i = 0; i < rx1 - rx0; ++i) {
-                                                totals.Add(pixel_row[i * stride_x]);
+                                        const std::uint64_t run = rx1 - rx0;
+                                        if (stride_x == 1) {
+                                            if (selected == nullptr) {
+                                                AccumulateRow<true, false>(pixel_row, 1, run, nullptr, totals);
+                                            } else {
+                                                AccumulateRow<true, true>(pixel_row, 1, run, selected, totals);
                                             }
+                                        } else if (selected == nullptr) {
+                                            AccumulateRow<false, false>(pixel_row, stride_x, run, nullptr, totals);
                                         } else {
-                                            const std::uint8_t* selected =
-                                                region.mask + ((y - region.y_start) * region.width) +
-                                                (rx0 - region.x_start);
-                                            for (std::uint64_t i = 0; i < rx1 - rx0; ++i) {
-                                                if (selected[i] != 0) {
-                                                    totals.Add(pixel_row[i * stride_x]);
-                                                }
-                                            }
+                                            AccumulateRow<false, true>(pixel_row, stride_x, run, selected, totals);
                                         }
 
                                         if (slot_num_pixels >= 0) {
