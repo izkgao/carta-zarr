@@ -6,6 +6,7 @@
 
 #include "carta-zarr/carta_zarr.h"
 
+#include "chunk_blocks.h"
 #include "reduce/spectral_reduce.h"
 #include "schema/profile.h"
 #include "store.h"
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include <utility>
@@ -132,6 +134,39 @@ public:
 
 namespace {
 
+// The axis a progressive read is split along: the slowest-varying one that selects more than a
+// single element. The destination is dense in logical order with axis 0 fastest, so splitting there
+// and nowhere else is what makes each finished piece extend a prefix instead of leaving holes.
+std::optional<std::size_t> SlowestSelectedAxis(const ReadRequest& request) {
+    for (std::size_t i = request.axes.size(); i-- > 0;) {
+        if (request.axes.at(i).count > 1) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+// How many elements of the split axis one piece should cover, so that the piece still holds enough
+// chunks to decode in parallel. The other axes already contribute whatever they span, so a plane
+// read needs far fewer rows per piece than a single-pixel column needs channels.
+std::uint64_t ChunksPerPiece(const ReadRequest& request, const ChunkGeometry& geometry, std::size_t axis) {
+    std::uint64_t other_chunks = 1;
+    for (std::size_t i = 0; i < request.axes.size(); ++i) {
+        if (i == axis) {
+            continue;
+        }
+        const auto chunk = i < geometry.chunk_shape.size() ? geometry.chunk_shape.at(i) : 0;
+        const auto& range = request.axes.at(i);
+        other_chunks *= internal::ChunksSpanned(range.start, range.count, range.stride, chunk);
+    }
+    const auto wanted = (internal::kMinChunksPerRead + other_chunks - 1) / std::max<std::uint64_t>(1, other_chunks);
+    const auto chunk = axis < geometry.chunk_shape.size() ? geometry.chunk_shape.at(axis) : 0;
+    const auto& range = request.axes.at(axis);
+    const auto stride = std::max<std::uint64_t>(1, range.stride);
+    // AlignedBlockEnd rounds this out to a whole chunk, so a low estimate costs nothing.
+    return std::max<std::uint64_t>(1, (wanted * std::max<std::uint64_t>(1, chunk)) / stride);
+}
+
 ChunkGeometry BuildChunkGeometry(const ImageDescriptor& descriptor, const StorageLayout& layout) {
     ChunkGeometry geometry;
     geometry.sharded = layout.sharded;
@@ -204,43 +239,90 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
         return control.error();
     }
 
-    auto* pixels = static_cast<float*>(destination.data);
-    if (options.apply_pixel_mask && _impl->descriptor.has_pixel_mask) {
-        if (options.temporary_memory_limit_bytes != 0 &&
-            elements > options.temporary_memory_limit_bytes) {
-            return MakeError(ErrorCode::buffer_too_small,
-                             "Pixel mask temporary buffer exceeds the configured memory limit",
-                             _impl->descriptor.id);
-        }
-        std::vector<std::uint8_t> mask(static_cast<std::size_t>(elements));
-        auto mask_read = _impl->store->ReadPixelMaskBytes(_impl->descriptor.pixel_mask_id, selection.value(),
-                                                          mask.data(), mask.size(), options);
-        if (!mask_read) {
-            return mask_read.error();
-        }
+    const bool apply_mask = options.apply_pixel_mask && _impl->descriptor.has_pixel_mask;
+    if (apply_mask && options.temporary_memory_limit_bytes != 0 && elements > options.temporary_memory_limit_bytes) {
+        return MakeError(ErrorCode::buffer_too_small,
+                         "Pixel mask temporary buffer exceeds the configured memory limit",
+                         _impl->descriptor.id);
+    }
 
-        // Read the mask first so an unavailable or cancelled mask cannot leave a partially updated
-        // destination. TensorStore still owns the pixel operation's in-flight completion before it
-        // returns, so the destination remains valid for the next read.
-        auto read = _impl->store->ReadPixelsFloat32(_impl->descriptor.id, selection.value(), pixels,
-                                                    static_cast<std::size_t>(elements), options);
-        if (!read) {
-            return read.error();
+    // One piece unless the caller asked to hear about progress, in which case the request is split
+    // along its slowest-varying selected axis. Splitting anywhere else, or without aligning to the
+    // chunk grid, would decode chunks twice and report a destination that is finished in patches
+    // rather than as a prefix.
+    const auto slab_axis = SlowestSelectedAxis(request);
+    const bool progressive = static_cast<bool>(options.progress) && slab_axis.has_value();
+
+    // Not splitting is the same loop with one piece covering everything, so there is one path to
+    // read rather than two to keep in agreement.
+    std::uint64_t slab_total = 1;
+    std::uint64_t slab_stride = elements;
+    std::uint64_t slab_step = 1;
+    std::uint64_t slab_chunk = 0;
+    if (progressive) {
+        const auto axis = slab_axis.value();
+        slab_total = request.axes.at(axis).count;
+        slab_stride = 1;
+        for (std::size_t i = 0; i < axis; ++i) {
+            slab_stride *= request.axes.at(i).count;
         }
-        // XRADIO stores flags with true meaning a good pixel.
-        for (std::size_t i = 0; i < mask.size(); ++i) {
-            if (mask.at(i) == 0) {
-                pixels[i] = std::numeric_limits<float>::quiet_NaN();
+        slab_chunk = axis < _impl->geometry.chunk_shape.size() ? _impl->geometry.chunk_shape.at(axis) : 0;
+        slab_step = ChunksPerPiece(request, _impl->geometry, axis);
+    }
+
+    auto* pixels = static_cast<float*>(destination.data);
+    std::vector<std::uint8_t> mask;
+
+    for (std::uint64_t begin = 0; begin < slab_total;) {
+        const std::uint64_t end =
+            progressive ? internal::AlignedBlockEnd(begin, slab_step, slab_total, request.axes.at(slab_axis.value()).start,
+                                                    request.axes.at(slab_axis.value()).stride, slab_chunk)
+                        : slab_total;
+
+        ReadRequest piece = request;
+        if (progressive) {
+            auto& range = piece.axes.at(slab_axis.value());
+            range.start = request.axes.at(slab_axis.value()).start + (begin * range.stride);
+            range.count = end - begin;
+        }
+        auto piece_selection = internal::zarr::BuildSelection(_impl->descriptor, piece);
+        if (!piece_selection) {
+            return piece_selection.error();
+        }
+        const auto piece_elements = static_cast<std::size_t>((end - begin) * slab_stride);
+        float* piece_pixels = pixels + (begin * slab_stride);
+
+        if (apply_mask) {
+            mask.assign(piece_elements, 0);
+            // The mask is read first so that an unavailable or cancelled mask cannot leave this
+            // piece of the destination updated. TensorStore still owns the pixel operation's
+            // in-flight completion before it returns, so the destination remains valid for the
+            // next read.
+            auto mask_read = _impl->store->ReadPixelMaskBytes(_impl->descriptor.pixel_mask_id,
+                                                              piece_selection.value(), mask.data(), mask.size(), options);
+            if (!mask_read) {
+                return mask_read.error();
             }
         }
-    } else {
-        // Read as one request. Splitting it into chunk-aligned slabs was tried and measured slightly
-        // slower on real data (360 ms against 348 for a 7763 x 4742 plane), so the region is handed to
-        // TensorStore whole and it decides how to fetch the chunks.
-        auto read = _impl->store->ReadPixelsFloat32(_impl->descriptor.id, selection.value(), pixels,
-                                                    static_cast<std::size_t>(elements), options);
+        auto read = _impl->store->ReadPixelsFloat32(_impl->descriptor.id, piece_selection.value(), piece_pixels,
+                                                    piece_elements, options);
         if (!read) {
             return read.error();
+        }
+        if (apply_mask) {
+            // XRADIO stores flags with true meaning a good pixel.
+            for (std::size_t i = 0; i < piece_elements; ++i) {
+                if (mask[i] == 0) {
+                    piece_pixels[i] = std::numeric_limits<float>::quiet_NaN();
+                }
+            }
+        }
+
+        begin = end;
+        if (options.progress && !options.progress(static_cast<std::size_t>(begin * slab_stride),
+                                                  static_cast<std::size_t>(elements))) {
+            return MakeError(ErrorCode::cancelled, "The read was cancelled by its progress callback",
+                             _impl->descriptor.id);
         }
     }
     return static_cast<std::size_t>(elements);

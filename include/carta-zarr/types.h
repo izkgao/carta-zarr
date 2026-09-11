@@ -254,6 +254,20 @@ struct ReadOptions {
     // TensorStore operation is not interrupted, but a request never starts another operation once
     // this deadline has passed.
     std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    // Called as the read advances, with the number of destination elements that are final and the
+    // number the request will produce in total. Returning false cancels the read, which then
+    // reports cancelled.
+    //
+    // Supplying this changes how the read is issued: it is split into chunk-aligned pieces along
+    // the slowest-varying selected axis, so that there is somewhere to report from and somewhere to
+    // stop. The destination is dense in logical order with axis 0 fastest, which is what makes the
+    // finished part a prefix rather than a scatter -- a caller can render or forward it as it
+    // arrives. Leave it unset and the read is issued exactly as it was before, in one piece.
+    //
+    // A read that nothing interrupts is not made slower by this: the pieces are sized to hold
+    // enough chunks to decode in parallel, and at that size a split read measures the same as an
+    // unsplit one.
+    std::function<bool(std::size_t elements_written, std::size_t elements_total)> progress;
     // Maximum temporary memory available to apply the pixel mask. Zero means no explicit limit.
     std::size_t temporary_memory_limit_bytes = 0;
 };

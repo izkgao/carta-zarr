@@ -321,6 +321,56 @@ void TestConcurrentReads(const carta::zarr::Image& sky) {
     Require(failures == 0, "concurrent reads of one image handle disagreed with a serial read");
 }
 
+// A read that reports its progress must produce the same pixels as one that does not, must report
+// a prefix that is already final, and must stop when the callback says so.
+void TestProgressiveRead(const carta::zarr::Image& sky) {
+    const auto request = WholeImage(sky.descriptor());
+    const std::size_t total = kL * kM * kFrequency * kPolarization * kTime;
+
+    std::vector<float> expected(total);
+    Require(static_cast<bool>(sky.Read(request, {expected.data(), expected.size() * sizeof(float)}, Unmasked())),
+            "the reference read failed");
+
+    std::vector<float> pixels(total, -1.0f);
+    std::vector<std::size_t> reported;
+    auto options = Unmasked();
+    options.progress = [&](std::size_t written, std::size_t elements_total) {
+        Require(elements_total == total, "progress should report the request's own element count");
+        Require(written > 0 && written <= total, "progress should report a prefix of the destination");
+        Require(reported.empty() || written > reported.back(), "the finished prefix should only grow");
+        // The point of a prefix rather than a count: what has been reported is already readable.
+        for (std::size_t i = 0; i < written; ++i) {
+            const bool matches = pixels.at(i) == expected.at(i) ||
+                                 (std::isnan(pixels.at(i)) && std::isnan(expected.at(i)));
+            Require(matches, "a reported prefix should already hold its final values");
+        }
+        reported.push_back(written);
+        return true;
+    };
+    const auto read = sky.Read(request, {pixels.data(), pixels.size() * sizeof(float)}, options);
+    Require(static_cast<bool>(read), "a progressive read failed");
+    Require(read.value() == total, "a progressive read reported the wrong element count");
+    Require(!reported.empty() && reported.back() == total, "the last progress report should cover everything");
+    for (std::size_t i = 0; i < total; ++i) {
+        const bool matches = pixels.at(i) == expected.at(i) || (std::isnan(pixels.at(i)) && std::isnan(expected.at(i)));
+        Require(matches, "a progressive read should return what an ordinary one returns");
+    }
+
+    // This fixture is one piece wide, so the split itself is exercised on real cubes rather than
+    // here; what this pins down is the contract every caller relies on.
+    std::vector<float> abandoned(total, -1.0f);
+    auto cancelling = Unmasked();
+    std::size_t calls = 0;
+    cancelling.progress = [&](std::size_t, std::size_t) {
+        ++calls;
+        return false;
+    };
+    const auto cancelled = sky.Read(request, {abandoned.data(), abandoned.size() * sizeof(float)}, cancelling);
+    Require(!cancelled, "a progress callback returning false should cancel the read");
+    Require(cancelled.error().code == carta::zarr::ErrorCode::cancelled, "cancelling should report cancelled");
+    Require(calls == 1, "a cancelled read should stop at the piece that refused");
+}
+
 }  // namespace
 
 int main() {
@@ -333,6 +383,7 @@ int main() {
         TestMaskFusion(sky);
         TestRejectedRequests(sky);
         TestReadControls(sky);
+        TestProgressiveRead(sky);
         TestConcurrentReads(sky);
     } catch (const std::exception& error) {
         std::cerr << "pixel read test failed: " << error.what() << "\n";
