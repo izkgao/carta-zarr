@@ -274,6 +274,13 @@ struct ReadOptions {
     // by -- both are "how much this read may hold at once", and splitting to fit is a better answer
     // than refusing. A read that cannot be split still reports buffer_too_small rather than
     // allocating past the limit.
+    //
+    // For ReduceSpectral it is a target rather than a limit. That walk splits along x, along the
+    // chunk rows and along the spectrum, and each of the three bottoms out at one chunk, which is
+    // the smallest thing that can be decoded: asking for part of a chunk decodes all of it anyway,
+    // and asking twice decodes it twice. So an image whose chunk is larger than this exceeds it by
+    // the ratio, and refusing to reduce would be the worse answer. ChunkGeometry::chunk_shape says
+    // in advance when that will happen.
     std::size_t temporary_memory_limit_bytes = 0;
 };
 
