@@ -26,7 +26,7 @@ Result<double> ArrayView::At(const std::vector<NamedIndex>& indices) const {
     // C order: the last dimension varies fastest.
     std::vector<std::uint64_t> strides(rank, 1);
     for (std::size_t dimension = rank; dimension-- > 1;) {
-        strides[dimension - 1] = strides[dimension] * _metadata.shape[dimension];
+        strides.at(dimension - 1) = strides.at(dimension) * _metadata.shape.at(dimension);
     }
 
     std::uint64_t offset = 0;
@@ -35,18 +35,18 @@ Result<double> ArrayView::At(const std::vector<NamedIndex>& indices) const {
         if (!dimension) {
             return MakeError(ErrorCode::invalid_slice, "Array has no dimension named " + std::string(name));
         }
-        if (index >= _metadata.shape[*dimension]) {
+        if (index >= _metadata.shape.at(*dimension)) {
             return MakeError(ErrorCode::invalid_slice,
                              "Index " + std::to_string(index) + " is past the end of dimension " + std::string(name));
         }
-        offset += index * strides[*dimension];
+        offset += index * strides.at(*dimension);
     }
 
     if (offset >= _values.size()) {
         return MakeError(ErrorCode::invalid_metadata,
                          "Array holds fewer values than its shape declares; the store is truncated");
     }
-    return _values[offset];
+    return _values.at(offset);
 }
 
 }  // namespace carta::zarr::internal::zarr

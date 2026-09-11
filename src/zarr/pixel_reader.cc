@@ -39,10 +39,10 @@ bool SelectionIsWellFormed(const PixelSelection& selection) {
     }
     std::vector<bool> seen(rank, false);
     for (const auto stored : selection.logical_to_stored) {
-        if (stored >= rank || seen[stored]) {
+        if (stored >= rank || seen.at(stored)) {
             return false;
         }
-        seen[stored] = true;
+        seen.at(stored) = true;
     }
     return std::all_of(selection.stride.begin(), selection.stride.end(),
                        [](std::uint64_t value) { return value > 0; });
@@ -77,7 +77,7 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
         if (!opened) {
             return opened.error();
         }
-        auto store = std::move(opened).value();
+        auto const store = std::move(opened).value();
         const auto rank = selection.start.size();
         if (static_cast<std::size_t>(store.rank()) != rank) {
             return MakeError(ErrorCode::invalid_argument, "Selection rank does not match the array rank",
@@ -89,10 +89,10 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
         std::vector<tensorstore::Index> stride(rank);
         std::vector<tensorstore::DimensionIndex> order(rank);
         for (std::size_t i = 0; i < rank; ++i) {
-            start[i] = static_cast<tensorstore::Index>(selection.start[i]);
-            count[i] = static_cast<tensorstore::Index>(selection.count[i]);
-            stride[i] = static_cast<tensorstore::Index>(selection.stride[i]);
-            order[i] = static_cast<tensorstore::DimensionIndex>(selection.logical_to_stored[i]);
+            start.at(i) = static_cast<tensorstore::Index>(selection.start.at(i));
+            count.at(i) = static_cast<tensorstore::Index>(selection.count.at(i));
+            stride.at(i) = static_cast<tensorstore::Index>(selection.stride.at(i));
+            order.at(i) = static_cast<tensorstore::DimensionIndex>(selection.logical_to_stored.at(i));
         }
 
         // Slice in stored order, then move the stored dimensions into logical order. Both are index
@@ -121,7 +121,7 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
 
         std::vector<tensorstore::Index> shape(rank);
         for (std::size_t i = 0; i < rank; ++i) {
-            shape[i] = count[order[i]];
+            shape.at(i) = count.at(order.at(i));
         }
         // Axis 0 is the fastest-varying destination dimension, so a logical-order shape over a
         // densely packed buffer is Fortran-ordered. TensorStore requires a shared array here; the
@@ -130,7 +130,7 @@ Result<void> ReadInto(const std::filesystem::path& array_path, const StoreContex
         auto target = tensorstore::Array(tensorstore::internal::UnownedToShared(destination), shape,
                                          tensorstore::fortran_order);
 
-        auto read_result = tensorstore::Read(std::move(converted).value(), target).result();
+        auto const read_result = tensorstore::Read(std::move(converted).value(), target).result();
         if (!read_result.ok()) {
             return MakeError(ErrorCode::io_error, "TensorStore read failed: " + read_result.status().ToString(),
                              std::string(node));

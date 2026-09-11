@@ -23,7 +23,7 @@
 
 namespace {
 
-const std::filesystem::path kFixture{CARTA_ZARR_PIXEL_FIXTURE};
+const char* const kFixture = CARTA_ZARR_PIXEL_FIXTURE;
 
 // Axis lengths of the fixture, in the logical order the library reports.
 constexpr std::uint64_t kL = 4;
@@ -39,7 +39,7 @@ bool InMissingChunk(std::uint64_t l, std::uint64_t frequency, std::uint64_t pola
 
 float ExpectedValue(std::uint64_t l, std::uint64_t m, std::uint64_t frequency, std::uint64_t polarization,
                     std::uint64_t time) {
-    return static_cast<float>(time * 10000 + frequency * 1000 + polarization * 100 + l * 10 + m);
+    return static_cast<float>((time * 10000) + (frequency * 1000) + (polarization * 100) + (l * 10) + m);
 }
 
 // The generator marks a pixel bad where (l + m) is a multiple of three.
@@ -58,7 +58,7 @@ carta::zarr::Image OpenSky() {
             "the pixel fixture is missing; run tests/data/generate_zarr_fixtures.py");
     const auto context = carta::zarr::Context::Create();
     Require(static_cast<bool>(context), "Context::Create failed");
-    auto dataset = carta::zarr::Dataset::Open(context.value(), kFixture.string());
+    auto dataset = carta::zarr::Dataset::Open(context.value(), kFixture);
     Require(static_cast<bool>(dataset), "Dataset::Open failed on the pixel fixture");
     auto image = dataset.value().OpenImage("SKY");
     Require(static_cast<bool>(image), "SKY could not be opened");
@@ -75,7 +75,7 @@ carta::zarr::ReadRequest WholeImage(const carta::zarr::ImageDescriptor& descript
 
 std::size_t LogicalOffset(std::uint64_t l, std::uint64_t m, std::uint64_t frequency, std::uint64_t polarization) {
     // Axis 0 is the fastest-varying destination dimension.
-    return static_cast<std::size_t>(l + kL * (m + kM * (frequency + kFrequency * polarization)));
+    return static_cast<std::size_t>(l + (kL * (m + (kM * (frequency + (kFrequency * polarization))))));
 }
 
 void TestAxesAndGeometry(const carta::zarr::Image& sky) {
@@ -84,9 +84,9 @@ void TestAxesAndGeometry(const carta::zarr::Image& sky) {
     const std::vector<std::pair<std::string, std::uint64_t>> expected{
         {"l", kL}, {"m", kM}, {"frequency", kFrequency}, {"polarization", kPolarization}, {"time", kTime}};
     for (std::size_t i = 0; i < expected.size(); ++i) {
-        Require(axes[i].name == expected[i].first,
-                "logical axis " + std::to_string(i) + " should be " + expected[i].first);
-        Require(axes[i].length == expected[i].second, "axis " + expected[i].first + " has the wrong length");
+        Require(axes.at(i).name == expected.at(i).first,
+                "logical axis " + std::to_string(i) + " should be " + expected.at(i).first);
+        Require(axes.at(i).length == expected.at(i).second, "axis " + expected.at(i).first + " has the wrong length");
     }
 
     // Stored order is (time, frequency, polarization, l, m), so every axis moves.
@@ -121,7 +121,7 @@ void TestWholeImage(const carta::zarr::Image& sky) {
         for (std::uint64_t f = 0; f < kFrequency; ++f) {
             for (std::uint64_t m = 0; m < kM; ++m) {
                 for (std::uint64_t l = 0; l < kL; ++l) {
-                    const float value = pixels[LogicalOffset(l, m, f, p)];
+                    const float value = pixels.at(LogicalOffset(l, m, f, p));
                     const std::string where = "at l=" + std::to_string(l) + " m=" + std::to_string(m) +
                                               " frequency=" + std::to_string(f) +
                                               " polarization=" + std::to_string(p);
@@ -152,7 +152,7 @@ void TestSubsetAndStride(const carta::zarr::Image& sky) {
 
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> selected{{0, 1}, {2, 1}, {0, 3}, {2, 3}};
     for (std::size_t i = 0; i < selected.size(); ++i) {
-        Require(pixels[i] == ExpectedValue(selected[i].first, selected[i].second, 0, 1, 0),
+        Require(pixels.at(i) == ExpectedValue(selected.at(i).first, selected.at(i).second, 0, 1, 0),
                 "a strided read returned the wrong element at offset " + std::to_string(i));
     }
 }
@@ -171,7 +171,7 @@ void TestPixelMask(const carta::zarr::Image& sky) {
         for (std::uint64_t f = 0; f < kFrequency; ++f) {
             for (std::uint64_t m = 0; m < kM; ++m) {
                 for (std::uint64_t l = 0; l < kL; ++l) {
-                    const bool good = mask[LogicalOffset(l, m, f, p)] != 0;
+                    const bool good = mask.at(LogicalOffset(l, m, f, p)) != 0;
                     Require(good == ExpectedFlag(l, m), "wrong mask value at l=" + std::to_string(l) +
                                                             " m=" + std::to_string(m));
                 }
@@ -191,7 +191,7 @@ void TestMaskFusion(const carta::zarr::Image& sky) {
         for (std::uint64_t f = 0; f < kFrequency; ++f) {
             for (std::uint64_t m = 0; m < kM; ++m) {
                 for (std::uint64_t l = 0; l < kL; ++l) {
-                    const float value = pixels[LogicalOffset(l, m, f, p)];
+                    const float value = pixels.at(LogicalOffset(l, m, f, p));
                     const std::string where = "at l=" + std::to_string(l) + " m=" + std::to_string(m);
                     if (!ExpectedFlag(l, m) || InMissingChunk(l, f, p)) {
                         Require(std::isnan(value), "a flagged or missing pixel should read as NaN " + where);
@@ -209,7 +209,7 @@ void TestRejectedRequests(const carta::zarr::Image& sky) {
     std::vector<float> pixels(kL * kM * kFrequency * kPolarization * kTime);
     const carta::zarr::MutableBufferView buffer{pixels.data(), pixels.size() * sizeof(float)};
 
-    const auto expect_rejected = [&](carta::zarr::ReadRequest request, const std::string& what) {
+    const auto expect_rejected = [&](const carta::zarr::ReadRequest& request, const std::string& what) {
         const auto read = sky.Read(request, buffer);
         Require(!read, what + " should be rejected");
         Require(read.error().code == carta::zarr::ErrorCode::invalid_argument,
@@ -217,23 +217,23 @@ void TestRejectedRequests(const carta::zarr::Image& sky) {
     };
 
     auto past_end = whole;
-    past_end.axes[0].start = kL;
+    past_end.axes.at(0).start = kL;
     expect_rejected(past_end, "a start past the end of an axis");
 
     auto too_long = whole;
-    too_long.axes[1].count = kM + 1;
+    too_long.axes.at(1).count = kM + 1;
     expect_rejected(too_long, "a count running past the end of an axis");
 
     auto strided_past_end = whole;
-    strided_past_end.axes[0] = {0, kL, 2};
+    strided_past_end.axes.at(0) = {0, kL, 2};
     expect_rejected(strided_past_end, "a stride carrying the last element past the end");
 
     auto zero_stride = whole;
-    zero_stride.axes[0].stride = 0;
+    zero_stride.axes.at(0).stride = 0;
     expect_rejected(zero_stride, "a zero stride");
 
     auto empty = whole;
-    empty.axes[2].count = 0;
+    empty.axes.at(2).count = 0;
     expect_rejected(empty, "an empty selection");
 
     auto wrong_rank = whole;
@@ -272,7 +272,7 @@ void TestConcurrentReads(const carta::zarr::Image& sky) {
                     for (std::uint64_t f = 0; f < kFrequency; ++f) {
                         for (std::uint64_t m = 0; m < kM; ++m) {
                             for (std::uint64_t l = 0; l < kL; ++l) {
-                                const float value = pixels[LogicalOffset(l, m, f, p)];
+                                const float value = pixels.at(LogicalOffset(l, m, f, p));
                                 const bool ok = InMissingChunk(l, f, p) ? std::isnan(value)
                                                                         : value == ExpectedValue(l, m, f, p, 0);
                                 if (!ok) {

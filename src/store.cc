@@ -214,10 +214,10 @@ Result<Store> OpenStore(TransportPtr transport, StoreContextPtr context) {
         return MakeError(ErrorCode::invalid_metadata, "Root Zarr metadata must be a JSON object", "zarr.json");
     }
     if (!metadata.contains("zarr_format") ||
-        !::carta::zarr::internal::zarr::IsNonNegativeInteger(metadata["zarr_format"])) {
+        !::carta::zarr::internal::zarr::IsNonNegativeInteger(metadata.at("zarr_format"))) {
         return MakeError(ErrorCode::invalid_metadata, "Root Zarr metadata has no valid zarr_format", "zarr.json");
     }
-    if (metadata["zarr_format"].get<std::uint64_t>() != 3) {
+    if (metadata.at("zarr_format").get<std::uint64_t>() != 3) {
         return MakeError(ErrorCode::unsupported_zarr_version, "Only Zarr format 3 is supported", "zarr.json");
     }
     if (metadata.value("node_type", "") != "group") {

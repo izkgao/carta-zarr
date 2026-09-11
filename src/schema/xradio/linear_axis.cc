@@ -36,7 +36,7 @@ std::size_t ClosestIndex(const std::vector<double>& values, double reference) {
 // consecutive spacings agree, not whether a value lands on a target.
 bool IsEvenlySpaced(const std::vector<double>& values, double increment) {
     for (std::size_t index = 2; index < values.size(); ++index) {
-        const double spacing = values[index] - values[index - 1];
+        const double spacing = values.at(index) - values.at(index - 1);
         const double tolerance = 1.0e-9 * std::max({1.0, std::abs(increment), std::abs(spacing)});
         if (std::abs(spacing - increment) > tolerance) {
             return false;
@@ -58,7 +58,7 @@ LinearAxisFit FitLinearAxis(const std::vector<double>& values, std::optional<dou
         return fit;
     }
 
-    const double increment = values[1] - values[0];
+    const double increment = values.at(1) - values.at(0);
     fit.increment = increment;
     if (increment == 0.0) {
         return fit;
@@ -77,7 +77,7 @@ LinearAxisFit FitLinearAxis(const std::vector<double>& values, std::optional<dou
     fit.reference_value = reference_value;
 
     const std::size_t closest = ClosestIndex(values, reference_value);
-    if (std::abs(values[closest] - reference_value) <= ExactnessTolerance(values)) {
+    if (std::abs(values.at(closest) - reference_value) <= ExactnessTolerance(values)) {
         fit.reference_pixel = static_cast<double>(closest + 1);
     } else {
         fit.reference_pixel = ((reference_value - values.front()) / increment) + 1.0;

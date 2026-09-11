@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -52,7 +53,7 @@ void WriteUtf32(const std::filesystem::path& path, const std::vector<std::string
     Require(output.is_open(), "Unable to write " + path.string());
     for (const auto& value : values) {
         for (std::size_t index = 0; index < code_points; ++index) {
-            const std::uint32_t code_point = index < value.size() ? static_cast<std::uint32_t>(value[index]) : 0U;
+            const std::uint32_t code_point = index < value.size() ? static_cast<std::uint32_t>(value.at(index)) : 0U;
             output.write(reinterpret_cast<const char*>(&code_point), sizeof(code_point));
         }
     }
@@ -157,11 +158,11 @@ void TestValidAndTimeAxis(const std::filesystem::path& root) {
             "Dataset::OpenImage failed" + (image ? std::string{} : ": " + image.error().message));
     Require(image.value().descriptor().axes.size() == 5, "time axis was not preserved");
     Require(image.value().descriptor().axes.back().length == 1, "unexpected singleton time axis");
-    Require(image.value().descriptor().axes[0].storage_index == 3 &&
-                image.value().descriptor().axes[1].storage_index == 1 &&
-                image.value().descriptor().axes[2].storage_index == 2 &&
-                image.value().descriptor().axes[3].storage_index == 4 &&
-                image.value().descriptor().axes[4].storage_index == 0,
+    Require(image.value().descriptor().axes.at(0).storage_index == 3 &&
+                image.value().descriptor().axes.at(1).storage_index == 1 &&
+                image.value().descriptor().axes.at(2).storage_index == 2 &&
+                image.value().descriptor().axes.at(3).storage_index == 4 &&
+                image.value().descriptor().axes.at(4).storage_index == 0,
             "logical axes were not mapped to the arbitrary storage order");
 
     // Verify Direction & Coordinates
@@ -223,7 +224,7 @@ void TestReferenceFixture() {
 
     // Resource limits must be accepted and applied to every read made through this context.
     carta::zarr::OpenOptions options;
-    options.cache_bytes = 32u * 1024u * 1024u;
+    options.cache_bytes = static_cast<std::size_t>(32U * 1024U * 1024U);
     options.io_threads = 2;
     options.decode_threads = 2;
     const auto context = carta::zarr::Context::Create(options);
@@ -253,9 +254,9 @@ void TestReferenceFixture() {
     Require(desc.direction.has_value(), "DirectionCoordinate missing in reference fixture");
     Require(desc.direction->projection_parameters == std::vector<double>{0.25, -0.5},
             "direction projection parameters were not preserved");
-    Require(desc.direction->native_pole_direction[0] == 0.0 && desc.direction->native_pole_direction[1] == 90.0,
+    Require(desc.direction->native_pole_direction.at(0) == 0.0 && desc.direction->native_pole_direction.at(1) == 90.0,
             "native pole direction was not preserved in degrees");
-    Require(desc.direction->reference_pixel[0] == 2.0 && desc.direction->reference_pixel[1] == 3.0,
+    Require(desc.direction->reference_pixel.at(0) == 2.0 && desc.direction->reference_pixel.at(1) == 3.0,
             "direction reference pixels were not located from the coordinate values");
     Require(desc.image_role == "sky", "image role was not read from the variable's type attribute");
     Require(desc.data_groups == std::vector<std::string>{"base", "deconvolution"},
@@ -376,7 +377,7 @@ void TestCoordinateCompletion(const std::filesystem::path& root) {
     Require(uniform_desc.spectral->reference_pixel == 1.0 && uniform_desc.spectral->reference_value == 100.0 &&
                 uniform_desc.spectral->increment == 2.0,
             "uniform spectral coordinates did not expose the linear description");
-    Require(uniform_desc.direction->reference_pixel[0] == 3.0 && uniform_desc.direction->reference_pixel[1] == 5.0,
+    Require(uniform_desc.direction->reference_pixel.at(0) == 3.0 && uniform_desc.direction->reference_pixel.at(1) == 5.0,
             "exact direction reference pixels were not found by index");
 
     CreateValidStore(root / "inexact");
@@ -390,7 +391,7 @@ void TestCoordinateCompletion(const std::filesystem::path& root) {
     Require(static_cast<bool>(inexact_image), "inexact coordinate image did not open");
     Require(HasDiagnostic(inexact_image.value().descriptor().diagnostics, "inexact_reference_pixel"),
             "inexact direction reference pixel did not produce a diagnostic");
-    Require(inexact_image.value().descriptor().direction->reference_pixel[0] == 4.0,
+    Require(inexact_image.value().descriptor().direction->reference_pixel.at(0) == 4.0,
             "inexact direction reference pixel did not use linear extrapolation");
 }
 

@@ -92,7 +92,7 @@ bool ProbeReport::RequireCoordinateOf(const zarr::ArrayMetadata& image, std::str
     }
 
     const auto& coordinate = array_result.value();
-    if (coordinate.shape.size() != 1 || coordinate.shape.front() != image.shape[*index] ||
+    if (coordinate.shape.size() != 1 || coordinate.shape.front() != image.shape.at(*index) ||
         coordinate.dimension_names.size() != 1 || coordinate.dimension_names.front() != axis) {
         return Fail("invalid_metadata", "Coordinate shape or dimension name does not match " + _profile_name, node);
     }

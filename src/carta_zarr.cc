@@ -152,8 +152,8 @@ Result<internal::zarr::PixelSelection> BuildSelection(const ImageDescriptor& des
     selection.logical_to_stored.resize(rank);
 
     for (std::size_t logical = 0; logical < rank; ++logical) {
-        const auto& axis = descriptor.axes[logical];
-        const auto& range = request.axes[logical];
+        const auto& axis = descriptor.axes.at(logical);
+        const auto& range = request.axes.at(logical);
         if (range.stride == 0) {
             return MakeError(ErrorCode::invalid_argument, "Axis '" + axis.name + "' has a zero stride",
                              descriptor.id);
@@ -175,10 +175,10 @@ Result<internal::zarr::PixelSelection> BuildSelection(const ImageDescriptor& des
             return MakeError(ErrorCode::invalid_metadata, "Axis '" + axis.name + "' has an out-of-range storage index",
                              descriptor.id);
         }
-        selection.start[stored] = range.start;
-        selection.count[stored] = range.count;
-        selection.stride[stored] = range.stride;
-        selection.logical_to_stored[logical] = stored;
+        selection.start.at(stored) = range.start;
+        selection.count.at(stored) = range.count;
+        selection.stride.at(stored) = range.stride;
+        selection.logical_to_stored.at(logical) = stored;
     }
     return selection;
 }
@@ -194,15 +194,15 @@ ChunkGeometry BuildChunkGeometry(const ImageDescriptor& descriptor, const Storag
     geometry.shard_shape.resize(rank);
     geometry.grid_shape.resize(rank);
     for (std::size_t logical = 0; logical < rank; ++logical) {
-        const auto& axis = descriptor.axes[logical];
+        const auto& axis = descriptor.axes.at(logical);
         const auto stored = axis.storage_index;
         const auto chunk =
-            stored < layout.chunk_shape.size() ? layout.chunk_shape[stored] : axis.length;
+            stored < layout.chunk_shape.size() ? layout.chunk_shape.at(stored) : axis.length;
         const auto shard =
-            stored < layout.shard_shape.size() ? layout.shard_shape[stored] : chunk;
-        geometry.chunk_shape[logical] = chunk;
-        geometry.shard_shape[logical] = shard == 0 ? chunk : shard;
-        geometry.grid_shape[logical] = chunk == 0 ? 0 : (axis.length + chunk - 1) / chunk;
+            stored < layout.shard_shape.size() ? layout.shard_shape.at(stored) : chunk;
+        geometry.chunk_shape.at(logical) = chunk;
+        geometry.shard_shape.at(logical) = shard == 0 ? chunk : shard;
+        geometry.grid_shape.at(logical) = chunk == 0 ? 0 : (axis.length + chunk - 1) / chunk;
         if (stored != logical) {
             geometry.transpose_required = true;
         }
@@ -268,7 +268,7 @@ Result<std::size_t> Image::Read(const ReadRequest& request, MutableBufferView de
         }
         // XRADIO stores flags with true meaning a good pixel.
         for (std::size_t i = 0; i < mask.size(); ++i) {
-            if (mask[i] == 0) {
+            if (mask.at(i) == 0) {
                 pixels[i] = std::numeric_limits<float>::quiet_NaN();
             }
         }
