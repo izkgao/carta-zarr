@@ -11,10 +11,13 @@
 #include "linear_axis.h"
 #include "probe_report.h"
 
+#include <carta-zarr/types.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <iterator>
 #include <optional>
 #include <utility>
@@ -126,13 +129,12 @@ std::vector<std::string> FindDataGroups(const nlohmann::json& root_attributes, s
 }
 
 std::vector<AxisDescriptor> DescribeAxes(const Store& store, const zarr_metadata::ArrayMetadata& image) {
-    const std::array<std::pair<std::string_view, AxisRole>, 5> logical_axes{{{"l", AxisRole::spatial_x},
-                                                                             {"m", AxisRole::spatial_y},
-                                                                             {"frequency", AxisRole::spectral},
-                                                                             {"polarization", AxisRole::polarization},
-                                                                             {"time", AxisRole::time}}};
+    constexpr std::array<std::string_view, kXradioImageAxisOrder.size()> logical_axis_names{"l", "m", "frequency",
+                                                                                            "polarization", "time"};
     std::vector<AxisDescriptor> axes;
-    for (const auto [name, role] : logical_axes) {
+    axes.reserve(logical_axis_names.size());
+    for (std::size_t logical = 0; logical < logical_axis_names.size(); ++logical) {
+        const auto name = logical_axis_names.at(logical);
         const auto index = zarr_metadata::FindDimensionIndex(image, name);
         if (!index) {
             continue;
@@ -142,7 +144,8 @@ std::vector<AxisDescriptor> DescribeAxes(const Store& store, const zarr_metadata
         if (coordinate_metadata) {
             unit = AttributeString(coordinate_metadata.value().attributes, "units");
         }
-        axes.push_back(AxisDescriptor{std::string(name), role, image.shape[*index], std::move(unit), *index});
+        axes.push_back(AxisDescriptor{std::string(name), kXradioImageAxisOrder.at(logical), image.shape.at(*index),
+                                      std::move(unit), *index});
     }
     return axes;
 }
@@ -178,8 +181,8 @@ std::optional<DirectionCoordinate> DescribeDirection(const nlohmann::json& root_
             reference_direction != nullptr && reference_direction->is_object()) {
             if (const auto* data = ObjectMember(*reference_direction, "data");
                 data != nullptr && data->is_array() && data->size() >= 2) {
-                direction.reference_value[0] = data->at(0).get<double>() * kRadToDeg;
-                direction.reference_value[1] = data->at(1).get<double>() * kRadToDeg;
+                direction.reference_value.at(0) = data->at(0).get<double>() * kRadToDeg;
+                direction.reference_value.at(1) = data->at(1).get<double>() * kRadToDeg;
             }
             if (const auto* attributes = ObjectMember(*reference_direction, "attrs");
                 attributes != nullptr && attributes->is_object()) {
@@ -189,8 +192,8 @@ std::optional<DirectionCoordinate> DescribeDirection(const nlohmann::json& root_
                         direction.equinox = equinox->get<double>();
                     } else if (equinox->is_string()) {
                         const std::string value = equinox->get<std::string>();
-                        const std::size_t position = (value.size() > 1 && (value[0] == 'J' || value[0] == 'B' ||
-                                                                           value[0] == 'j' || value[0] == 'b'))
+                        const std::size_t position = (value.size() > 1 && (value.at(0) == 'J' || value.at(0) == 'B' ||
+                                                                           value.at(0) == 'j' || value.at(0) == 'b'))
                                                        ? 1
                                                        : 0;
                         try {
@@ -213,19 +216,17 @@ std::optional<DirectionCoordinate> DescribeDirection(const nlohmann::json& root_
             native_pole != nullptr && native_pole->is_object()) {
             const auto* data = ObjectMember(*native_pole, "data");
             if (data != nullptr && zarr_metadata::IsNumericVector(*data, 2)) {
-                direction.native_pole_direction[0] = data->at(0).get<double>() * kRadToDeg;
-                direction.native_pole_direction[1] = data->at(1).get<double>() * kRadToDeg;
+                direction.native_pole_direction.at(0) = data->at(0).get<double>() * kRadToDeg;
+                direction.native_pole_direction.at(1) = data->at(1).get<double>() * kRadToDeg;
             }
         }
         if (const auto* matrix = ObjectMember(cs_info, "pixel_coordinate_transformation_matrix");
-            matrix != nullptr && matrix->is_array() && matrix->size() >= 2) {
-            if (matrix->at(0).is_array() && matrix->at(0).size() >= 2 && matrix->at(1).is_array() &&
-                matrix->at(1).size() >= 2) {
-                direction.transformation_matrix[0][0] = matrix->at(0).at(0).get<double>();
-                direction.transformation_matrix[0][1] = matrix->at(0).at(1).get<double>();
-                direction.transformation_matrix[1][0] = matrix->at(1).at(0).get<double>();
-                direction.transformation_matrix[1][1] = matrix->at(1).at(1).get<double>();
-            }
+            matrix != nullptr && matrix->is_array() && matrix->size() >= 2 && matrix->at(0).is_array() &&
+            matrix->at(0).size() >= 2 && matrix->at(1).is_array() && matrix->at(1).size() >= 2) {
+            direction.transformation_matrix.at(0).at(0) = matrix->at(0).at(0).get<double>();
+            direction.transformation_matrix.at(0).at(1) = matrix->at(0).at(1).get<double>();
+            direction.transformation_matrix.at(1).at(0) = matrix->at(1).at(0).get<double>();
+            direction.transformation_matrix.at(1).at(1) = matrix->at(1).at(1).get<double>();
         }
     }
 
@@ -241,8 +242,8 @@ std::optional<DirectionCoordinate> DescribeDirection(const nlohmann::json& root_
         }
         AppendDiagnostics(descriptor, std::move(fit.diagnostics));
     };
-    set_direction_axis(l_values, direction.increment[0], direction.reference_pixel[0], "l");
-    set_direction_axis(m_values, direction.increment[1], direction.reference_pixel[1], "m");
+    set_direction_axis(l_values, direction.increment.at(0), direction.reference_pixel.at(0), "l");
+    set_direction_axis(m_values, direction.increment.at(1), direction.reference_pixel.at(1), "m");
     return direction;
 }
 
@@ -419,7 +420,7 @@ struct BeamParameterIndices {
 BeamParameterIndices FindBeamParameterIndices(const std::vector<std::string>& labels) {
     BeamParameterIndices indices;
     for (std::size_t index = 0; index < labels.size(); ++index) {
-        const std::string label = Upper(labels[index]);
+        const std::string label = Upper(labels.at(index));
         if (label == "MAJOR") {
             indices.major = index;
         } else if (label == "MINOR") {
@@ -476,7 +477,7 @@ Result<::carta::zarr::internal::ImageDiscovery> DiscoverImages(const Store& stor
         }
     }
 
-    auto sort_images = [](std::vector<std::string>& images) {
+    const auto sort_images = [](std::vector<std::string>& images) {
         std::sort(images.begin(), images.end(), [](const auto& left, const auto& right) {
             const int left_rank = KnownImageRank(left);
             const int right_rank = KnownImageRank(right);
@@ -576,7 +577,7 @@ Result<ImageDescriptor> DescribeImage(const Store& store, std::string_view image
         descriptor.spectral = std::move(spectral);
     }
 
-    auto polarization_metadata = store.ReadNodeMetadata("polarization");
+    auto const polarization_metadata = store.ReadNodeMetadata("polarization");
     if (polarization_metadata) {
         auto pol_labels = store.ReadStringArray1D("polarization");
         if (!pol_labels) {
@@ -661,9 +662,9 @@ Result<std::vector<Beam>> ReadBeams(const Store& store, std::string_view image_i
         return std::vector<Beam>{};
     }
 
-    const std::uint64_t n_time = time_dim ? beam_arr_info.shape[*time_dim] : 1;
-    const std::uint64_t n_chan = beam_arr_info.shape[*freq_dim];
-    const std::uint64_t n_pol = beam_arr_info.shape[*pol_dim];
+    const std::uint64_t n_time = time_dim ? beam_arr_info.shape.at(*time_dim) : 1;
+    const std::uint64_t n_chan = beam_arr_info.shape.at(*freq_dim);
+    const std::uint64_t n_pol = beam_arr_info.shape.at(*pol_dim);
 
     // Time varies slowest so that a single-plane beam table reads back in the order it always has.
     const zarr_metadata::ArrayView beam_values(beam_arr_info, beam_data);

@@ -75,6 +75,9 @@ enum class AxisRole {
     other,
 };
 
+inline constexpr std::array<AxisRole, 5> kXradioImageAxisOrder{
+    AxisRole::spatial_x, AxisRole::spatial_y, AxisRole::spectral, AxisRole::polarization, AxisRole::time};
+
 struct AxisDescriptor {
     std::string name;
     AxisRole role = AxisRole::other;
@@ -201,6 +204,7 @@ struct ImageDescriptor {
     std::string image_role;
     std::vector<std::string> data_groups;
     DataType stored_type = DataType::unknown;
+    // XRADIO images report axes in kXradioImageAxisOrder; storage_index identifies each stored dimension.
     std::vector<AxisDescriptor> axes;
     std::string unit;
     bool has_pixel_mask = false;
@@ -223,6 +227,7 @@ struct Range {
 };
 
 struct ReadRequest {
+    // One range per ImageDescriptor::axes entry, in the same order.
     std::vector<Range> axes;
     DataType output_type = DataType::float32;
 };
