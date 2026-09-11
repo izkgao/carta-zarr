@@ -57,10 +57,12 @@ carta::zarr::Image OpenSky(const char* fixture) {
 }
 
 // The same rule the library follows, written out here so the two cannot drift together.
-std::vector<std::uint64_t> Expected(std::uint64_t frequency, std::uint64_t polarization, float lower,
-                                    float upper, std::size_t bins) {
+std::vector<std::uint64_t> Expected(std::uint64_t frequency, std::uint64_t polarization, double range_lower,
+                                    double range_upper, std::size_t bins) {
     std::vector<std::uint64_t> counts(bins, 0);
-    const float width = (upper - lower) / static_cast<float>(bins);
+    const float width = static_cast<float>((range_upper - range_lower) / bins);
+    const float lower = static_cast<float>(range_lower);
+    const float upper = static_cast<float>(range_upper);
     for (std::uint64_t m = 0; m < kM; ++m) {
         for (std::uint64_t l = 0; l < kL; ++l) {
             if (!ExpectedFlag(l, m) || InMissingChunk(l, frequency, polarization)) {
@@ -109,7 +111,7 @@ Collected Collect(const carta::zarr::Image& sky, const carta::zarr::HistogramReq
     return collected;
 }
 
-carta::zarr::HistogramRequest WholeSpectrum(std::uint64_t polarization, float lower, float upper,
+carta::zarr::HistogramRequest WholeSpectrum(std::uint64_t polarization, double lower, double upper,
                                             std::uint32_t bins) {
     carta::zarr::HistogramRequest request;
     request.spectral = {0, kFrequency, 1};

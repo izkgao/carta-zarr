@@ -118,7 +118,11 @@ Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descrip
     const std::uint64_t band_rows =
         std::max<std::uint64_t>(1, slab_budget_bytes / std::max<std::uint64_t>(1, row_chunks * chunk_bytes));
 
-    const float width = (request.upper - request.lower) / static_cast<float>(request.bins);
+    // The caller's own sequence: divide in double, narrow the width, compare against the narrowed
+    // bounds. Doing any one of those in the other type moves pixels across bin edges.
+    const float width = static_cast<float>((request.upper - request.lower) / request.bins);
+    const float lower = static_cast<float>(request.lower);
+    const float upper = static_cast<float>(request.upper);
     const auto bins = static_cast<std::size_t>(request.bins);
     const auto rank = descriptor.axes.size();
     std::vector<std::uint64_t> counts;
@@ -241,8 +245,8 @@ Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descrip
                             const float value = row[u * stride_u];
                             // The caller's own rule, in the caller's own type: a pixel outside the
                             // range is not counted, and NaN fails both comparisons.
-                            if (request.lower <= value && value <= request.upper) {
-                                auto bin = static_cast<std::size_t>((value - request.lower) / width);
+                            if (lower <= value && value <= upper) {
+                                auto bin = static_cast<std::size_t>((value - lower) / width);
                                 if (bin >= bins) {
                                     bin = bins - 1;
                                 }

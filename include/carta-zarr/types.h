@@ -387,10 +387,11 @@ struct RegionMask {
 
 // One plane histogram request: bin every pixel of each plane over a fixed range.
 //
-// The bounds and the arithmetic are float on purpose. The counts a caller already produces come
-// from `(val - min) / ((max - min) / bins)` evaluated in float and truncated, and an integer count
-// is the one thing here that can match exactly rather than to a tolerance -- doing the same
-// division in double would move pixels across bin edges and lose that.
+// The bounds arrive as double and the per-pixel arithmetic happens in float, which is not an
+// oversight but the rule a caller already follows: it keeps the range as double, divides by the bin
+// count in double, and narrows only the resulting width to float. Comparing a pixel then happens
+// against the narrowed bounds. An integer count is the one thing here that can match exactly rather
+// than to a tolerance, so the sequence of roundings is copied rather than approximated.
 //
 // A pixel outside [lower, upper] is not counted, and neither is one that is not finite, which is
 // the same rule: NaN fails both comparisons.
@@ -399,8 +400,8 @@ struct HistogramRequest {
     std::uint64_t polarization = 0;
     std::uint64_t time = 0;
     std::uint32_t bins = 0;
-    float lower = 0.0F;
-    float upper = 0.0F;
+    double lower = 0.0;
+    double upper = 0.0;
     // How often to hand results back; zero lets the library choose, as in SpectralReduceRequest.
     std::uint32_t emit_every_channels = 0;
 };
