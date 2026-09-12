@@ -10,6 +10,7 @@
 #include "carta-zarr/carta_zarr.h"
 
 #include "store.h"
+#include "work_pool.h"
 
 namespace carta::zarr::internal {
 
@@ -22,10 +23,15 @@ namespace carta::zarr::internal {
  *
  * Like the reduction it reads in the store's own axis order -- binning does not care what order it
  * sees the pixels in, so there is no reason to pay a transpose for them.
+ *
+ * `workers` runs the binning. Each plane's counts are its own row of the block, so the split is by
+ * rows of the plane with one private histogram per worker, summed into the row at the end -- the
+ * alternative, splitting by plane, is capped at however many planes one read holds, which for a
+ * large image is often one.
  */
 Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descriptor,
                               const ChunkGeometry& geometry, const HistogramRequest& request,
-                              const HistogramSink& sink, const ReadOptions& options);
+                              const HistogramSink& sink, const ReadOptions& options, WorkPool& workers);
 
 /**
  * One histogram for the whole selection in a single pass. See CubeHistogramRequest.

@@ -347,7 +347,7 @@ Result<void> WalkChannels(const PlaneWalk& walk, std::uint64_t begin, std::uint6
 
 Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descriptor,
                               const ChunkGeometry& geometry, const HistogramRequest& request,
-                              const HistogramSink& sink, const ReadOptions& options) {
+                              const HistogramSink& sink, const ReadOptions& options, WorkPool& workers) {
     const auto& node = descriptor.id;
     if (!sink) {
         return MakeError(ErrorCode::invalid_argument, "A histogram needs a sink", node);
@@ -390,6 +390,26 @@ Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descrip
     const auto bins = static_cast<std::size_t>(request.bins);
     std::vector<std::uint64_t> counts;
 
+    // How many private histograms the binning may split a plane into. Capped three ways: by the
+    // pool, by memory, and -- inside the visit, where the plane's size is known -- by whether there
+    // is enough work to be worth waking anyone for.
+    //
+    // The memory cap is what keeps a large bin count from turning a split into an allocation: a
+    // caller may ask for as many as kMaxHistogramBins, and a private copy of that for every worker
+    // is hundreds of megabytes for a pass that is supposed to stream.
+    constexpr std::size_t kPartialBudgetBytes = 64U << 20U;
+    // Below this a task is not worth its share of a dispatch, so the plane is binned in place.
+    constexpr std::uint64_t kLeastPixelsPerTask = 1U << 16U;
+    const std::size_t partials_by_memory =
+        std::max<std::size_t>(1, kPartialBudgetBytes / std::max<std::size_t>(1, bins * sizeof(std::uint64_t)));
+    const std::size_t max_tasks = std::min(workers.size(), partials_by_memory);
+    // One allocation for the whole walk. Each task owns one row of it, so no two of them ever touch
+    // the same bin and the sum at the end is the only place they meet.
+    std::vector<std::uint64_t> partials;
+    if (max_tasks > 1) {
+        partials.resize(max_tasks * bins);
+    }
+
     for (std::uint64_t block_begin = 0; block_begin < spectral.count;) {
         const std::uint64_t block_end = AlignedBlockEnd(block_begin, wanted_channels, spectral.count,
                                                         spectral.start, spectral.stride, walk.chunk_depth);
@@ -423,19 +443,50 @@ Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descrip
             [&](std::uint64_t channel, const float* plane, std::uint64_t stride_u, std::uint64_t stride_v,
                 std::uint64_t u_count, std::uint64_t v_count) {
                 std::uint64_t* into = counts.data() + (static_cast<std::size_t>(channel) * bins);
-                for (std::uint64_t v = 0; v < v_count; ++v) {
-                    const float* row = plane + (v * stride_v);
-                    for (std::uint64_t u = 0; u < u_count; ++u) {
-                        const float value = row[u * stride_u];
-                        // The caller's own rule: a pixel outside the range is not counted, and NaN
-                        // fails both comparisons.
-                        if (lower <= value && value <= upper) {
-                            auto bin = static_cast<std::size_t>((value - lower) / width);
-                            if (bin >= bins) {
-                                bin = bins - 1;
+
+                const auto bin_rows = [&](std::uint64_t v_first, std::uint64_t v_last,
+                                          std::uint64_t* destination) {
+                    for (std::uint64_t v = v_first; v < v_last; ++v) {
+                        const float* row = plane + (v * stride_v);
+                        for (std::uint64_t u = 0; u < u_count; ++u) {
+                            const float value = row[u * stride_u];
+                            // The caller's own rule: a pixel outside the range is not counted, and
+                            // NaN fails both comparisons.
+                            if (lower <= value && value <= upper) {
+                                auto bin = static_cast<std::size_t>((value - lower) / width);
+                                if (bin >= bins) {
+                                    bin = bins - 1;
+                                }
+                                ++destination[bin];
                             }
-                            ++into[bin];
                         }
+                    }
+                };
+
+                // Rows, not planes: a read holding one plane is the common case for a large image,
+                // so splitting by plane would leave the split with nothing to divide.
+                const std::size_t tasks = PlanRowTasks(u_count, v_count, max_tasks, kLeastPixelsPerTask);
+                if (tasks <= 1) {
+                    bin_rows(0, v_count, into);
+                    return;
+                }
+
+                std::fill(partials.begin(), partials.begin() + static_cast<std::ptrdiff_t>(tasks * bins), 0);
+                const std::uint64_t rows_per_task = (v_count + tasks - 1) / tasks;
+                workers.Run(tasks, [&](std::size_t task, std::size_t) {
+                    const std::uint64_t v_first = static_cast<std::uint64_t>(task) * rows_per_task;
+                    if (v_first >= v_count) {
+                        return;
+                    }
+                    bin_rows(v_first, std::min(v_first + rows_per_task, v_count),
+                             partials.data() + (task * bins));
+                });
+                // Integer counts, so this sum is the serial loop's answer exactly -- which is what
+                // lets histogram_test keep comparing against an oracle rather than a tolerance.
+                for (std::size_t task = 0; task < tasks; ++task) {
+                    const std::uint64_t* from = partials.data() + (task * bins);
+                    for (std::size_t bin = 0; bin < bins; ++bin) {
+                        into[bin] += from[bin];
                     }
                 }
             });

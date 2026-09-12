@@ -11,6 +11,7 @@
 #include "reduce/spectral_reduce.h"
 #include "schema/profile.h"
 #include "store.h"
+#include "work_pool.h"
 #include "zarr/array_metadata.h"
 #include "zarr/pixel_reader.h"
 #include "zarr/store_context.h"
@@ -95,12 +96,21 @@ bool TryComputeDirectorySize(std::string_view location, std::chrono::millisecond
 class Context::Impl {
 public:
     Impl(OpenOptions options, internal::StoreContextPtr store_context)
-        : options(options), store_context(std::move(store_context)) {}
+        : options(options),
+          store_context(std::move(store_context)),
+          // decode_threads is the consumer's statement of how much of this machine the library may
+          // use, so it sizes both pools rather than only TensorStore's. The two are busy at
+          // different moments -- a slab is read and then visited -- so sizing each at the whole
+          // budget does not double the demand. Zero means one worker per hardware thread, which is
+          // what TensorStore's own default does with the same number.
+          workers(std::make_shared<internal::WorkPool>(options.decode_threads)) {}
 
     OpenOptions options;
     // Shared by every dataset and image opened through this context, so that its cache and
     // concurrency limits apply to all reads rather than being rebuilt per read.
     internal::StoreContextPtr store_context;
+    // The per-pixel work of a reduction. See WorkPool.
+    std::shared_ptr<internal::WorkPool> workers;
 };
 
 Context::Context(std::shared_ptr<Impl> impl) : _impl(std::move(impl)) {}
@@ -400,7 +410,8 @@ Result<void> Image::ComputeHistogram(const HistogramRequest& request, const Hist
     if (!_impl || !_impl->store) {
         return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
     }
-    return internal::ComputeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options);
+    return internal::ComputeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options,
+                                      *_impl->context->workers);
 }
 
 Result<CubeHistogramResult> Image::ComputeCubeHistogram(const CubeHistogramRequest& request) const {

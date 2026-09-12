@@ -59,7 +59,8 @@ add_library(carta_zarr SHARED
     src/zarr/string_array.cc
     src/zarr/transport.cc
     src/zarr/value_reader.cc
-    src/store.cc)
+    src/store.cc
+    src/work_pool.cc)
 add_library(CARTA::zarr ALIAS carta_zarr)
 
 target_compile_features(carta_zarr PUBLIC cxx_std_17)
@@ -70,7 +71,11 @@ target_include_directories(carta_zarr
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# The library starts its own worker threads now (WorkPool), so it asks for the threading
+# support it uses rather than inheriting it from TensorStore's link interface.
+find_package(Threads REQUIRED)
 target_link_libraries(carta_zarr PRIVATE
+    Threads::Threads
     nlohmann_json::nlohmann_json
     ZLIB::ZLIB
     Zstd::Zstd
@@ -203,6 +208,17 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
     find_package(Threads REQUIRED)
     target_link_libraries(carta_zarr_memo_tests PRIVATE Threads::Threads)
     add_test(NAME carta-zarr-memo COMMAND carta_zarr_memo_tests)
+
+    # The worker pool and the rule that decides whether to wake it. Compiled on its own because the
+    # reductions' own fixtures are far smaller than the split's threshold, so the parallel path is
+    # unreachable from there -- see the comment at the top of the test.
+    add_executable(carta_zarr_work_pool_tests tests/work_pool_test.cc src/work_pool.cc)
+    target_compile_features(carta_zarr_work_pool_tests PRIVATE cxx_std_17)
+    target_include_directories(carta_zarr_work_pool_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(carta_zarr_work_pool_tests PRIVATE Threads::Threads)
+    add_test(NAME carta-zarr-work-pool COMMAND carta_zarr_work_pool_tests)
 
     # The linear axis fit is pure: values in, a linear description out. It is tested on its own,
     # with no store and no transport, so the cases that are awkward to build as a directory tree --

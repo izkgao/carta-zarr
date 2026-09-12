@@ -45,10 +45,10 @@ float ExpectedValue(std::uint64_t l, std::uint64_t m, std::uint64_t frequency, s
     return static_cast<float>((frequency * 1000) + (polarization * 100) + (l * 10) + m);
 }
 
-carta::zarr::Image OpenSky(const char* fixture) {
+carta::zarr::Image OpenSky(const char* fixture, const carta::zarr::OpenOptions& options = {}) {
     Require(std::filesystem::exists(fixture),
             "the pixel fixture is missing; run tests/data/generate_zarr_fixtures.py");
-    const auto context = carta::zarr::Context::Create();
+    const auto context = carta::zarr::Context::Create(options);
     Require(static_cast<bool>(context), "Context::Create failed");
     auto dataset = carta::zarr::Dataset::Open(context.value(), fixture);
     Require(static_cast<bool>(dataset), "Dataset::Open failed on the pixel fixture");
@@ -351,6 +351,29 @@ void TestOnePassRejectsAndCancels(const carta::zarr::Image& sky) {
 
 }  // namespace
 
+// decode_threads sizes the worker pool that bins the pixels as well as TensorStore's read pool, so
+// the same question asked of two differently sized pools must come back with the same counts. This
+// fixture is far below the split's threshold, so what this pins is the wiring rather than the
+// split itself -- work_pool_test covers the split, which no fixture this small can reach.
+void TestThreadCountDoesNotChangeTheCounts(const char* fixture) {
+    std::vector<std::vector<std::uint64_t>> answers;
+    for (const unsigned int threads : {1U, 2U, 8U}) {
+        carta::zarr::OpenOptions options;
+        options.decode_threads = threads;
+        const auto sky = OpenSky(fixture, options);
+        const auto collected = Collect(sky, WholeSpectrum(0, 0.0F, 2000.0F, 16), {});
+        std::vector<std::uint64_t> flat;
+        for (const auto& channel : collected.per_channel) {
+            flat.insert(flat.end(), channel.begin(), channel.end());
+        }
+        answers.push_back(std::move(flat));
+    }
+    for (std::size_t index = 1; index < answers.size(); ++index) {
+        Require(answers[index] == answers.front(),
+                "the counts changed with the thread count, which they must not");
+    }
+}
+
 int main() {
     for (const char* const fixture : kFixtures) {
         try {
@@ -365,6 +388,7 @@ int main() {
             TestTheProvisionalRangeGrowsToFit(sky);
             TestSamplingTakesFewerPixels(sky);
             TestOnePassRejectsAndCancels(sky);
+            TestThreadCountDoesNotChangeTheCounts(fixture);
         } catch (const std::exception& error) {
             std::cerr << "histogram test failed on " << fixture << ": " << error.what() << "\n";
             return 1;
