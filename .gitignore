@@ -82,8 +82,14 @@ AGENTS.md
 docs/implementation-plan.md
 docs/read-api.md
 docs/sidecar.md
+docs/verification-gaps.md
+docs/handover.md
+docs/handover-prompt.md
 docs/architecture.html
 docs/*.xlsx
+
+# A personal transfer helper: it hardcodes a host on the local network.
+scripts/sync-local-docs.sh
 
 # An unreferenced schema spreadsheet kept for reference while the XRADIO layout is still moving.
 Image Data Schema.xlsx
