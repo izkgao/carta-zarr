@@ -27,6 +27,14 @@ Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descrip
                               const ChunkGeometry& geometry, const HistogramRequest& request,
                               const HistogramSink& sink, const ReadOptions& options);
 
+/**
+ * One histogram for the whole selection in a single pass. See CubeHistogramRequest.
+ */
+Result<CubeHistogramResult> ComputeCubeHistogram(const Store& store, const ImageDescriptor& descriptor,
+                                                 const ChunkGeometry& geometry,
+                                                 const CubeHistogramRequest& request,
+                                                 const ReadOptions& options);
+
 }  // namespace carta::zarr::internal
 
 #endif  // CARTA_ZARR_SRC_REDUCE_PLANE_HISTOGRAM_H_

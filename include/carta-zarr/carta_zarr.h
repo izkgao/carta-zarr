@@ -89,6 +89,12 @@ public:
     Result<void> ComputeHistogram(const HistogramRequest& request, const HistogramSink& sink,
                                   const ReadOptions& options) const;
 
+    // One histogram for the whole selection in a single pass, when the range is not known in
+    // advance. See CubeHistogramRequest for what that costs and what it keeps exact.
+    Result<CubeHistogramResult> ComputeCubeHistogram(const CubeHistogramRequest& request) const;
+    Result<CubeHistogramResult> ComputeCubeHistogram(const CubeHistogramRequest& request,
+                                                     const ReadOptions& options) const;
+
     Result<std::vector<Beam>> ReadBeams() const;
 
 private:

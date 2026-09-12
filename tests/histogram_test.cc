@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -231,6 +232,123 @@ void TestRejectedRequests(const carta::zarr::Image& sky) {
     rejects(outside, "a spectral range outside the image should be rejected");
 }
 
+// One pass over the whole selection, with the range discovered on the way. What it keeps exact is
+// the extremes, the counts and the sums; what it gives up is where the bin edges land.
+void TestOnePassMatchesTheTwoPassAnswer(const carta::zarr::Image& sky) {
+    const std::uint64_t polarization = 1;
+    carta::zarr::CubeHistogramRequest request;
+    request.spectral = {0, kFrequency, 1};
+    request.polarization = polarization;
+    request.bins = 12;
+    const auto one_pass = sky.ComputeCubeHistogram(request);
+    Require(static_cast<bool>(one_pass),
+            std::string("the one-pass histogram failed: ") +
+                (one_pass.has_value() ? "" : one_pass.error().message));
+    const auto& result = one_pass.value();
+
+    // The extremes and the sums, from the fixture's encoding.
+    double expected_pixels = 0.0;
+    double expected_nan = 0.0;
+    double expected_sum = 0.0;
+    double expected_min = std::numeric_limits<double>::infinity();
+    double expected_max = -std::numeric_limits<double>::infinity();
+    for (std::uint64_t f = 0; f < kFrequency; ++f) {
+        for (std::uint64_t m = 0; m < kM; ++m) {
+            for (std::uint64_t l = 0; l < kL; ++l) {
+                if (!ExpectedFlag(l, m) || InMissingChunk(l, f, polarization)) {
+                    expected_nan += 1.0;
+                    continue;
+                }
+                const double value = ExpectedValue(l, m, f, polarization);
+                expected_pixels += 1.0;
+                expected_sum += value;
+                expected_min = std::min(expected_min, value);
+                expected_max = std::max(expected_max, value);
+            }
+        }
+    }
+    Require(result.num_pixels == expected_pixels, "the finite pixel count should be exact");
+    Require(result.nan_count == expected_nan, "the absent pixel count should be exact");
+    Require(std::abs(result.sum - expected_sum) <= 1e-9 * (1.0 + std::abs(expected_sum)),
+            "the sum should agree to a rounding");
+    Require(result.minimum == expected_min, "the minimum should be exact, whatever the bins did");
+    Require(result.maximum == expected_max, "the maximum should be exact, whatever the bins did");
+    Require(!result.sampled, "nothing was sampled");
+
+    std::uint64_t total = 0;
+    for (const auto count : result.counts) {
+        total += count;
+    }
+    Require(static_cast<double>(total) == expected_pixels,
+            "every finite pixel should land in some bin; the provisional range grows until it does");
+
+    // Against the two-pass answer over the range this pass discovered. They need not agree bin for
+    // bin -- a provisional bin straddling a target edge goes to one side -- so what is required is
+    // that no bin is off by more than the fixture's largest provisional bin could hold, which for
+    // values this far apart is nothing.
+    auto fixed = WholeSpectrum(polarization, result.minimum, result.maximum, request.bins);
+    const auto two_pass = Collect(sky, fixed, {});
+    for (std::size_t bin = 0; bin < request.bins; ++bin) {
+        std::uint64_t summed = 0;
+        for (std::uint64_t f = 0; f < kFrequency; ++f) {
+            summed += two_pass.per_channel.at(static_cast<std::size_t>(f)).at(bin);
+        }
+        Require(result.counts.at(bin) == summed,
+                "bin " + std::to_string(bin) + ": one pass said " + std::to_string(result.counts.at(bin)) +
+                    ", two passes said " + std::to_string(summed));
+    }
+}
+
+// The provisional range starts around the first pixel seen and doubles its way out. A selection
+// whose values span far more than that first guess is the case that exercises it.
+void TestTheProvisionalRangeGrowsToFit(const carta::zarr::Image& sky) {
+    carta::zarr::CubeHistogramRequest request;
+    request.spectral = {0, kFrequency, 1};
+    request.polarization = 0;
+    request.bins = 4;
+    // Few enough bins that the merging on every doubling is visible rather than hidden in noise.
+    request.provisional_bins = 8;
+    const auto result = sky.ComputeCubeHistogram(request);
+    Require(static_cast<bool>(result), "a coarse provisional histogram should still work");
+    std::uint64_t total = 0;
+    for (const auto count : result.value().counts) {
+        total += count;
+    }
+    Require(static_cast<double>(total) == result.value().num_pixels,
+            "merging on a doubling must not drop a pixel");
+}
+
+// Sampling reads fewer pixels, and says so.
+void TestSamplingTakesFewerPixels(const carta::zarr::Image& sky) {
+    carta::zarr::CubeHistogramRequest request;
+    request.spectral = {0, kFrequency, 1};
+    request.polarization = 0;
+    request.bins = 8;
+    const auto every = sky.ComputeCubeHistogram(request);
+    Require(static_cast<bool>(every), "the unsampled pass should work");
+
+    request.spatial_sample = 2;
+    const auto sampled = sky.ComputeCubeHistogram(request);
+    Require(static_cast<bool>(sampled), "the sampled pass should work");
+    Require(sampled.value().sampled, "a sampled result should say so");
+    Require(sampled.value().num_pixels + sampled.value().nan_count <
+                every.value().num_pixels + every.value().nan_count,
+            "taking every second pixel along both axes should look at fewer of them");
+    Require(sampled.value().minimum >= every.value().minimum &&
+                sampled.value().maximum <= every.value().maximum,
+            "a sample cannot find an extreme that is not there");
+}
+
+void TestOnePassRejectsAndCancels(const carta::zarr::Image& sky) {
+    carta::zarr::CubeHistogramRequest request;
+    request.spectral = {0, kFrequency, 1};
+    request.bins = 0;
+    Require(!sky.ComputeCubeHistogram(request), "zero bins should be rejected");
+    request.bins = 8;
+    request.spatial_sample = 0;
+    Require(!sky.ComputeCubeHistogram(request), "a sample of zero should be rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -243,6 +361,10 @@ int main() {
             TestAnUnfinishedBlockIsHandedOver(sky);
             TestSinkCancels(sky);
             TestRejectedRequests(sky);
+            TestOnePassMatchesTheTwoPassAnswer(sky);
+            TestTheProvisionalRangeGrowsToFit(sky);
+            TestSamplingTakesFewerPixels(sky);
+            TestOnePassRejectsAndCancels(sky);
         } catch (const std::exception& error) {
             std::cerr << "histogram test failed on " << fixture << ": " << error.what() << "\n";
             return 1;

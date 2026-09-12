@@ -403,6 +403,18 @@ Result<void> Image::ComputeHistogram(const HistogramRequest& request, const Hist
     return internal::ComputeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options);
 }
 
+Result<CubeHistogramResult> Image::ComputeCubeHistogram(const CubeHistogramRequest& request) const {
+    return ComputeCubeHistogram(request, ReadOptions{});
+}
+
+Result<CubeHistogramResult> Image::ComputeCubeHistogram(const CubeHistogramRequest& request,
+                                                        const ReadOptions& options) const {
+    if (!_impl || !_impl->store) {
+        return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
+    }
+    return internal::ComputeCubeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, options);
+}
+
 Result<std::vector<Beam>> Image::ReadBeams() const {
     if (!_impl) {
         return MakeError(ErrorCode::invalid_argument, "Image handle is empty");

@@ -436,6 +436,64 @@ struct HistogramBlock {
 
 using HistogramSink = std::function<bool(const HistogramBlock&)>;
 
+// One histogram for the whole selection in a single pass, for a caller that does not know the range
+// in advance.
+//
+// The two-pass shape exists because bin edges come from the data's own extremes, so binning has to
+// wait for the pass that finds them. This does both at once: it bins into a provisional histogram
+// far finer than the one asked for, doubles that histogram's range and merges its bins in pairs
+// whenever a pixel falls outside -- no pixel is lost, only resolution -- and re-aggregates at the
+// end over the extremes it tracked exactly along the way.
+//
+// What is given up is where the bin edges land. A target bin's count can be wrong by the contents
+// of one provisional bin at each end, which at the default resolution is under two percent of one
+// bin and shrinks as provisional_bins grows. The extremes, the counts and the sums are exact.
+//
+// The result is one histogram for the whole selection, not one per plane: no plane's counts can be
+// settled until the last pixel has been read, and holding a provisional histogram for every plane
+// of a deep cube is gigabytes. A caller that adds its planes together loses nothing by it.
+struct CubeHistogramRequest {
+    Range spectral;
+    std::uint64_t polarization = 0;
+    std::uint64_t time = 0;
+    // The bins the caller wants back.
+    std::uint32_t bins = 0;
+    // The resolution the walk bins at. Zero takes the library's default; larger is more faithful and
+    // costs eight bytes a bin. Rounded up to a power of two so that merging in pairs leaves nothing
+    // behind.
+    std::uint32_t provisional_bins = 0;
+    // Take every nth pixel along both spatial axes. One reads every pixel.
+    //
+    // Worth knowing before reaching for it: a stride below the chunk width saves no decompression,
+    // because a chunk comes back whole however few of its pixels are wanted. It pays when it steps
+    // over whole chunks.
+    std::uint64_t spatial_sample = 1;
+    // Called as the walk advances, with the fraction of its chunks that are done. Returning false
+    // cancels.
+    std::function<bool(double progress)> progress;
+};
+
+// Everything one pass can say about the selection.
+struct CubeHistogramResult {
+    double num_pixels = 0.0;
+    double nan_count = 0.0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    // Exact, whatever the bin edges did. NaN when nothing finite was read.
+    double minimum = 0.0;
+    double maximum = 0.0;
+    // `bins` counts over [minimum, maximum].
+    std::vector<std::uint64_t> counts;
+    // Whether spatial_sample kept this from being every pixel.
+    bool sampled = false;
+};
+
+// The provisional resolution a cube histogram bins at when the caller does not choose one.
+//
+// 65,536 bins is 512 kB and puts about sixty-five of them inside each of a thousand target bins, so
+// an edge lands within about one and a half percent of one target bin's count.
+inline constexpr std::uint32_t kDefaultProvisionalBins = 1u << 16;
+
 // The largest number of bins one histogram accepts. CARTA's automatic bin count is the square root
 // of the plane's pixel count, which is 32,768 for the largest image anyone has; this is a guard
 // against an uninitialised count, not a capacity estimate.
