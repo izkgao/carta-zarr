@@ -58,13 +58,21 @@ LinearAxisFit FitLinearAxis(const std::vector<double>& values, std::optional<dou
         return fit;
     }
 
-    const double increment = values.at(1) - values.at(0);
+    double increment = values.at(1) - values.at(0);
     fit.increment = increment;
     if (increment == 0.0) {
         return fit;
     }
 
     fit.uniform = IsEvenlySpaced(values, increment);
+    if (fit.uniform && values.size() > 2) {
+        // Adjacent samples of a direction cosine axis differ in their last few digits, so one pair
+        // carries several digits less precision than the axis itself does. Spreading the whole span
+        // over the samples recovers them, and two axes cut from the same grid then agree exactly --
+        // which casacore's square-pixel test requires.
+        increment = (values.back() - values.front()) / static_cast<double>(values.size() - 1);
+        fit.increment = increment;
+    }
     if (!fit.uniform) {
         fit.diagnostics.push_back(
             MakeDiagnostic("nonuniform_axis",
