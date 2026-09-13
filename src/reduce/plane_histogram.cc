@@ -78,9 +78,20 @@ public:
     void Add(float value) {
         const double v = value;
         if (!_seeded) {
-            // A first range around the first pixel seen. Its width hardly matters -- anything
-            // outside doubles its way in -- but a zero width would never grow.
-            const double magnitude = std::max(1.0, std::abs(v));
+            // A first range around the first pixel seen, and a narrow one. The range only ever
+            // grows, so a guess that is too wide is permanent while one that is too narrow costs a
+            // few merges and then fits.
+            //
+            // Anchoring it at one instead of at the pixel's own magnitude is what this used to do,
+            // and on a radio image it spent almost all of the resolution on the empty space between
+            // a Jansky and the hundredths of one the pixels actually are: a two-wide range over
+            // 65,536 bins left about three of them inside each of a thousand target bins rather
+            // than the sixty-five the default is chosen for.
+            //
+            // The floor is there because a first pixel of exactly zero would give a range of zero
+            // width, which never grows. Starting that far down costs a couple of hundred merges
+            // before the range fits -- once, against a cube of billions of pixels.
+            const double magnitude = std::max<double>(std::abs(v), std::numeric_limits<float>::min());
             _lower = v - magnitude;
             _width = (2.0 * magnitude) / static_cast<double>(_counts.size());
             _seeded = true;

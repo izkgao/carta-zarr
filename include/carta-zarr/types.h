@@ -451,12 +451,12 @@ using HistogramSink = std::function<bool(const HistogramBlock&)>;
 //
 // The walk runs on as many threads as the context was given, each with a provisional histogram of
 // its own that it re-aggregates onto the same target grid at the end, so the counts depend on the
-// thread count and a caller who needs the same ones every time asks for one decode thread. They do
-// not get worse for it: each thread sees a narrower spread of values than the whole selection does,
-// needs fewer doublings to hold it, and so bins at a finer resolution than one thread would. On a
-// billion-pixel ASKAP cube twenty-eight threads placed more pixels in the bin the two-pass answer
-// puts them in than one thread did, and every percentile CARTA offers landed within a seventh of
-// one bin of that answer on both.
+// thread count and a caller who needs the same ones every time asks for one decode thread. What
+// that costs is small and does not grow with the threads, because each one also sees a narrower
+// spread of values than the whole selection does and so bins at a finer resolution: on a
+// billion-pixel ASKAP cube against the two-pass answer over the same range, one thread misplaced
+// 0.44% of pixels and twenty-eight misplaced 0.46%, and every percentile CARTA offers landed within
+// a fiftieth of one bin on both.
 //
 // The result is one histogram for the whole selection, not one per plane: no plane's counts can be
 // settled until the last pixel has been read, and holding a provisional histogram for every plane
