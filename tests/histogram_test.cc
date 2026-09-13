@@ -349,6 +349,165 @@ void TestOnePassRejectsAndCancels(const carta::zarr::Image& sky) {
     Require(!sky.ComputeCubeHistogram(request), "a sample of zero should be rejected");
 }
 
+// The wide fixture, whose planes are big enough for a histogram to divide between workers. See
+// generate_wide_pixel_fixture: value = (f * P + p) * 1e6 + (l / 8) * 1000 + (m / 8), exactly
+// representable in a float32 and so recomputable here rather than approximable.
+namespace wide {
+
+constexpr std::uint64_t kL = 512;
+constexpr std::uint64_t kM = 520;
+constexpr std::uint64_t kFrequency = 4;
+constexpr std::uint64_t kPolarization = 2;
+
+double ExpectedValue(std::uint64_t l, std::uint64_t m, std::uint64_t frequency, std::uint64_t polarization) {
+    const auto plane = (frequency * kPolarization) + polarization;
+    return static_cast<double>((plane * 1000000) + ((l / 8) * 1000) + (m / 8));
+}
+
+// Everything the parallel paths only reach on a fixture this size. On the small ones PlanRowTasks
+// answers one however many workers there are, so all of this ran on the calling thread and the
+// private accumulators, the merge and the row split went unexercised.
+void TestAWidePlaneSplitsAndStillCounts(const char* fixture) {
+    // Fixed range, so the counts are integers and a split that loses or repeats a pixel is visible
+    // as an exact disagreement rather than a tolerance.
+    const double lower = 0.0;
+    const double upper = 8000000.0;
+    const std::uint32_t bins = 64;
+
+    std::vector<std::uint64_t> oracle(bins, 0);
+    const double width = (upper - lower) / bins;
+    for (std::uint64_t f = 0; f < kFrequency; ++f) {
+        for (std::uint64_t l = 0; l < kL; ++l) {
+            for (std::uint64_t m = 0; m < kM; ++m) {
+                const double value = ExpectedValue(l, m, f, 1);
+                auto bin = static_cast<std::size_t>((value - lower) / width);
+                if (bin >= bins) {
+                    bin = bins - 1;
+                }
+                ++oracle[bin];
+            }
+        }
+    }
+
+    std::vector<std::vector<std::uint64_t>> answers;
+    for (const unsigned int threads : {1U, 4U, 16U}) {
+        carta::zarr::OpenOptions options;
+        options.decode_threads = threads;
+        const auto sky = OpenSky(fixture, options);
+
+        std::vector<std::uint64_t> totals(bins, 0);
+        carta::zarr::HistogramRequest request;
+        request.spectral = {0, kFrequency, 1};
+        request.polarization = 1;
+        request.bins = bins;
+        request.lower = lower;
+        request.upper = upper;
+        const auto walked = sky.ComputeHistogram(request, [&](const carta::zarr::HistogramBlock& block) {
+            if (!block.complete) {
+                return true;
+            }
+            for (std::uint64_t channel = 0; channel < block.channel_count; ++channel) {
+                const std::uint64_t* row = block.counts + (channel * block.bin_count);
+                for (std::size_t bin = 0; bin < block.bin_count; ++bin) {
+                    totals[bin] += row[bin];
+                }
+            }
+            return true;
+        });
+        Require(static_cast<bool>(walked), "the wide histogram failed");
+        answers.push_back(std::move(totals));
+    }
+
+    for (std::size_t index = 0; index < answers.size(); ++index) {
+        Require(answers[index] == oracle,
+                "the wide plane's counts should match the oracle however many workers split it");
+    }
+}
+
+// Same fixture, the one-pass walk. Its counts are allowed to move with the thread count -- each
+// worker re-aggregates its own provisional histogram -- so what is pinned is what may not: the
+// pixel count, the extremes, and that every pixel lands in a bin.
+void TestAWideCubeSplitsAndStillAddsUp(const char* fixture) {
+    double expected_pixels = 0.0;
+    double expected_min = std::numeric_limits<double>::infinity();
+    double expected_max = -std::numeric_limits<double>::infinity();
+    for (std::uint64_t f = 0; f < kFrequency; ++f) {
+        for (std::uint64_t l = 0; l < kL; ++l) {
+            for (std::uint64_t m = 0; m < kM; ++m) {
+                const double value = ExpectedValue(l, m, f, 0);
+                expected_pixels += 1.0;
+                expected_min = std::min(expected_min, value);
+                expected_max = std::max(expected_max, value);
+            }
+        }
+    }
+
+    for (const unsigned int threads : {1U, 4U, 16U}) {
+        carta::zarr::OpenOptions options;
+        options.decode_threads = threads;
+        const auto sky = OpenSky(fixture, options);
+        carta::zarr::CubeHistogramRequest request;
+        request.spectral = {0, kFrequency, 1};
+        request.polarization = 0;
+        request.bins = 128;
+        const auto result = sky.ComputeCubeHistogram(request);
+        Require(static_cast<bool>(result), "the wide one-pass histogram failed");
+        const auto& answer = result.value();
+        Require(answer.num_pixels == expected_pixels, "the wide cube's pixel count should be exact");
+        Require(answer.nan_count == 0.0, "the wide fixture has no absent chunk");
+        Require(answer.minimum == expected_min, "the wide cube's minimum should be exact");
+        Require(answer.maximum == expected_max, "the wide cube's maximum should be exact");
+        std::uint64_t total = 0;
+        for (const auto count : answer.counts) {
+            total += count;
+        }
+        Require(static_cast<double>(total) == expected_pixels,
+                "every pixel should land in a bin however many workers binned it");
+    }
+}
+
+// Reporting and splitting at once. The budget makes the walk take several reads, which is what
+// makes it report; the fixture's size makes each of those reads wide enough to divide between
+// workers. Every snapshot is therefore taken over accumulators that several threads have been
+// writing to, which is the arrangement the small fixture cannot produce.
+void TestAWideCubeReportsWhileItSplits(const char* fixture) {
+    carta::zarr::OpenOptions options;
+    options.decode_threads = 8;
+    const auto sky = OpenSky(fixture, options);
+
+    carta::zarr::ReadOptions read_options;
+    read_options.temporary_memory_limit_bytes = 1U << 20U;
+
+    carta::zarr::CubeHistogramRequest request;
+    request.spectral = {0, kFrequency, 1};
+    request.polarization = 0;
+    request.bins = 64;
+
+    std::size_t updates = 0;
+    double last_pixels = -1.0;
+    request.progress = [&](const carta::zarr::CubeHistogramProgress& update) {
+        ++updates;
+        const auto snapshot = update.snapshot();
+        std::uint64_t total = 0;
+        for (const auto count : snapshot.counts) {
+            total += count;
+        }
+        Require(static_cast<double>(total) == snapshot.num_pixels,
+                "a snapshot taken mid-split should still hold every pixel it has counted");
+        Require(snapshot.num_pixels >= last_pixels, "a snapshot cannot un-read a pixel");
+        last_pixels = snapshot.num_pixels;
+        return true;
+    };
+
+    const auto result = sky.ComputeCubeHistogram(request, read_options);
+    Require(static_cast<bool>(result), "the wide one-pass histogram failed");
+    Require(updates > 1, "a budget this small should have taken several reads and reported on each");
+    Require(result.value().num_pixels == static_cast<double>(kL * kM * kFrequency),
+            "splitting and reporting must not change what was counted");
+}
+
+}  // namespace wide
+
 }  // namespace
 
 // The walk reports as it goes, and what it reports is a histogram of what it has read rather than a
@@ -493,6 +652,15 @@ int main() {
             std::cerr << "histogram test failed on " << fixture << ": " << error.what() << "\n";
             return 1;
         }
+    }
+
+    try {
+        wide::TestAWidePlaneSplitsAndStillCounts(CARTA_ZARR_PIXEL_FIXTURE_WIDE);
+        wide::TestAWideCubeSplitsAndStillAddsUp(CARTA_ZARR_PIXEL_FIXTURE_WIDE);
+        wide::TestAWideCubeReportsWhileItSplits(CARTA_ZARR_PIXEL_FIXTURE_WIDE);
+    } catch (const std::exception& error) {
+        std::cerr << "histogram test failed on the wide fixture: " << error.what() << "\n";
+        return 1;
     }
     return 0;
 }

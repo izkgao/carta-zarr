@@ -62,10 +62,10 @@ void RequireClose(double actual, double expected, const std::string& message) {
             message + ": expected " + std::to_string(expected) + ", got " + std::to_string(actual));
 }
 
-carta::zarr::Image OpenSky(const char* fixture) {
+carta::zarr::Image OpenSky(const char* fixture, const carta::zarr::OpenOptions& options = {}) {
     Require(std::filesystem::exists(fixture),
             "the pixel fixture is missing; run tests/data/generate_zarr_fixtures.py");
-    const auto context = carta::zarr::Context::Create();
+    const auto context = carta::zarr::Context::Create(options);
     Require(static_cast<bool>(context), "Context::Create failed");
     auto dataset = carta::zarr::Dataset::Open(context.value(), fixture);
     Require(static_cast<bool>(dataset), "Dataset::Open failed on the pixel fixture");
@@ -576,6 +576,91 @@ void TestRejectedRequests(const carta::zarr::Image& sky) {
 
 }  // namespace
 
+// The wide fixture, whose chunks are big enough for the reduction to split its units between
+// workers. See generate_wide_pixel_fixture: value = (f * P + p) * 1e6 + (l / 8) * 1000 + (m / 8),
+// exactly representable in a float32.
+namespace wide {
+
+constexpr std::uint64_t kL = 512;
+constexpr std::uint64_t kM = 520;
+constexpr std::uint64_t kFrequency = 4;
+constexpr std::uint64_t kPolarization = 2;
+
+double ExpectedValue(std::uint64_t l, std::uint64_t m, std::uint64_t frequency, std::uint64_t polarization) {
+    const auto plane = (frequency * kPolarization) + polarization;
+    return static_cast<double>((plane * 1000000) + ((l / 8) * 1000) + (m / 8));
+}
+
+// What the reduction only does on a fixture this size. Below 65,536 pixels to a chunk PlanRowTasks
+// answers one however many workers there are, so the private sinks and the merge that adds them up
+// never ran on the small fixtures.
+//
+// The counts and the extremes are exact at any thread count; the sums are re-associated once the
+// work is split, so they are held to a rounding rather than to the bit.
+void TestAWideRegionSplitsAndStillAgrees(const char* fixture) {
+    const std::uint64_t polarization = 1;
+    const std::vector<carta::zarr::RegionMask> regions{
+        {0, 0, kL, kM, nullptr},        // the whole plane
+        {100, 60, 300, 400, nullptr},   // an interior box across several chunks
+    };
+
+    // The oracle, recomputed from the fixture's encoding.
+    std::vector<double> expected_pixels(regions.size() * kFrequency, 0.0);
+    std::vector<double> expected_sum(regions.size() * kFrequency, 0.0);
+    std::vector<double> expected_min(regions.size() * kFrequency, std::numeric_limits<double>::infinity());
+    std::vector<double> expected_max(regions.size() * kFrequency, -std::numeric_limits<double>::infinity());
+    for (std::size_t r = 0; r < regions.size(); ++r) {
+        const auto& region = regions[r];
+        for (std::uint64_t f = 0; f < kFrequency; ++f) {
+            const auto at = (r * kFrequency) + f;
+            for (std::uint64_t y = region.y_start; y < region.y_start + region.height; ++y) {
+                for (std::uint64_t x = region.x_start; x < region.x_start + region.width; ++x) {
+                    // A region's x runs along l and its y along m, which is the order the image
+                    // axes are in and the opposite of how the generator's formula reads.
+                    const double value = ExpectedValue(x, y, f, polarization);
+                    expected_pixels[at] += 1.0;
+                    expected_sum[at] += value;
+                    expected_min[at] = std::min(expected_min[at], value);
+                    expected_max[at] = std::max(expected_max[at], value);
+                }
+            }
+        }
+    }
+
+    for (const unsigned int threads : {1U, 4U, 16U}) {
+        carta::zarr::OpenOptions options;
+        options.decode_threads = threads;
+        const auto sky = OpenSky(fixture, options);
+
+        carta::zarr::SpectralReduceRequest request;
+        request.spectral = {0, kFrequency, 1};
+        request.polarization = polarization;
+        request.regions = regions.data();
+        request.region_count = regions.size();
+        request.statistics = AllStatistics();
+        const auto collected = Collect(sky, request);
+
+        for (std::size_t r = 0; r < regions.size(); ++r) {
+            for (std::uint64_t f = 0; f < kFrequency; ++f) {
+                const auto at = (r * kFrequency) + f;
+                const std::string where = "region " + std::to_string(r) + " channel " + std::to_string(f) +
+                                          " on " + std::to_string(threads) + " threads";
+                RequireClose(collected.At(r, carta::zarr::Statistic::num_pixels, f), expected_pixels[at],
+                             where + " pixels");
+                RequireClose(collected.At(r, carta::zarr::Statistic::nan_count, f), 0.0, where + " nan");
+                RequireClose(collected.At(r, carta::zarr::Statistic::min, f), expected_min[at], where + " min");
+                RequireClose(collected.At(r, carta::zarr::Statistic::max, f), expected_max[at], where + " max");
+                const double sum = collected.At(r, carta::zarr::Statistic::sum, f);
+                Require(std::abs(sum - expected_sum[at]) <= 1e-9 * (1.0 + std::abs(expected_sum[at])),
+                        where + " sum: expected " + std::to_string(expected_sum[at]) + ", got " +
+                            std::to_string(sum));
+            }
+        }
+    }
+}
+
+}  // namespace wide
+
 int main() {
     std::vector<carta::zarr::AxisRole> fast_axes;
     for (const char* const fixture : kFixtures) {
@@ -599,6 +684,12 @@ int main() {
             std::cerr << "spectral reduce test failed on " << fixture << ": " << error.what() << "\n";
             return 1;
         }
+    }
+    try {
+        wide::TestAWideRegionSplitsAndStillAgrees(CARTA_ZARR_PIXEL_FIXTURE_WIDE);
+    } catch (const std::exception& error) {
+        std::cerr << "spectral reduce test failed on the wide fixture: " << error.what() << "\n";
+        return 1;
     }
     try {
         Require(fast_axes.size() == 2 && fast_axes.at(0) != fast_axes.at(1),
