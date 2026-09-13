@@ -445,18 +445,19 @@ using HistogramSink = std::function<bool(const HistogramBlock&)>;
 // whenever a pixel falls outside -- no pixel is lost, only resolution -- and re-aggregates at the
 // end over the extremes it tracked exactly along the way.
 //
-// What is given up is where the bin edges land. A target bin's count can be wrong by the contents
-// of one provisional bin at each end, which at the default resolution is under two percent of one
-// bin and shrinks as provisional_bins grows. The extremes, the total count and the sums are exact.
+// What is given up is where the bin edges land. A provisional bin straddling a target edge is split
+// between the two in proportion to the overlap, so what is left is the assumption that pixels are
+// spread evenly inside one provisional bin -- the same assumption the caller's own percentile makes
+// between target bins, and a far smaller error than giving the straddling bin to one side whole.
+// The extremes, the total count and the sums are exact.
 //
 // The walk runs on as many threads as the context was given, each with a provisional histogram of
 // its own that it re-aggregates onto the same target grid at the end, so the counts depend on the
-// thread count and a caller who needs the same ones every time asks for one decode thread. What
-// that costs is small and does not grow with the threads, because each one also sees a narrower
-// spread of values than the whole selection does and so bins at a finer resolution: on a
-// billion-pixel ASKAP cube against the two-pass answer over the same range, one thread misplaced
-// 0.44% of pixels and twenty-eight misplaced 0.46%, and every percentile CARTA offers landed within
-// a fiftieth of one bin on both.
+// thread count and a caller who needs the same ones every time asks for one decode thread. It is
+// not much of a dependence. On a billion-pixel ASKAP cube against the two-pass answer over the same
+// range, one thread misplaced 0.007% of pixels and twenty-eight misplaced 0.004%; the two disagreed
+// with each other about 0.007% of pixels, no target bin by more than 0.002 of an average one, and
+// every percentile CARTA offers landed within 0.003 of a bin of the two-pass answer on both.
 //
 // The result is one histogram for the whole selection, not one per plane: no plane's counts can be
 // settled until the last pixel has been read, and holding a provisional histogram for every plane
@@ -499,9 +500,19 @@ struct CubeHistogramResult {
 
 // The provisional resolution a cube histogram bins at when the caller does not choose one.
 //
-// 65,536 bins is 512 kB and puts about sixty-five of them inside each of a thousand target bins, so
-// an edge lands within about one and a half percent of one target bin's count.
-inline constexpr std::uint32_t kDefaultProvisionalBins = 1u << 16;
+// Sixteen provisional bins for every bin asked for, because what decides the error is how finely
+// the walk resolves one target bin, not how many bins it holds in total -- and because the
+// provisional histogram is eight bytes a bin and there is one per worker, so the ones nobody needs
+// are paid for in cache. A thousand target bins get 16,384 of them, which is 128 kB.
+//
+// Held between 4,096 and 65,536. Measured on a billion-pixel ASKAP cube against the exact two-pass
+// answer, with the walk on twenty-eight threads: 65,536 misplaced 0.003% of pixels in 3.64 s,
+// 16,384 misplaced 0.004% in 2.40 s, 8,192 misplaced 0.006% in 2.21 s, 4,096 misplaced 0.011% in
+// 2.14 s, and below that both numbers get worse at once. Sixteen is where the time has flattened
+// out, with a few times the resolution the error would need.
+inline constexpr std::uint32_t kProvisionalBinsPerBin = 16;
+inline constexpr std::uint32_t kLeastProvisionalBins = 1u << 12;
+inline constexpr std::uint32_t kMostProvisionalBins = 1u << 16;
 
 // The largest number of bins one histogram accepts. CARTA's automatic bin count is the square root
 // of the plane's pixel count, which is 32,768 for the largest image anyone has; this is a guard

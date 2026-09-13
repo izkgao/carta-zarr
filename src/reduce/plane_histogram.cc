@@ -109,9 +109,17 @@ public:
         ++_counts[bin];
     }
 
-    // Re-aggregate over the range the caller wants, giving each provisional bin to the target bin
-    // its centre falls in. That is where the error lives: a target edge cutting through a
-    // provisional bin takes all of it or none of it.
+    // Re-aggregate over the range the caller wants, splitting each provisional bin between the
+    // target bins it overlaps in proportion to how much of it each one covers.
+    //
+    // Giving the whole of it to the bin its centre falls in is the obvious thing and it is what
+    // this used to do, but the error that leaves is a bias rather than a wobble: every provisional
+    // bin straddling a target edge leans the same way, and nothing averages it out. Splitting
+    // assumes the pixels are spread evenly inside one provisional bin, which is the assumption the
+    // caller's own percentile already makes between target bins.
+    //
+    // Largest remainder, so the split still adds up: every pixel the walk binned comes out in some
+    // target bin, which is what lets the caller compare the total against its own pixel count.
     std::vector<std::uint64_t> Aggregate(std::size_t bins, double lower, double upper) const {
         std::vector<std::uint64_t> out(bins, 0);
         std::uint64_t total = 0;
@@ -124,14 +132,63 @@ public:
             return out;
         }
         const double target_width = (upper - lower) / static_cast<double>(bins);
+        const auto last_bin = static_cast<std::ptrdiff_t>(bins) - 1;
+        // Held outside the loop: a provisional bin usually overlaps two target bins, and this would
+        // otherwise allocate for every one of tens of thousands of them.
+        std::vector<double> shares;
         for (std::size_t i = 0; i < _counts.size(); ++i) {
-            if (_counts[i] == 0) {
+            const std::uint64_t count = _counts[i];
+            if (count == 0) {
                 continue;
             }
-            const double centre = _lower + (_width * (static_cast<double>(i) + 0.5));
-            auto bin = static_cast<std::ptrdiff_t>((centre - lower) / target_width);
-            bin = std::clamp<std::ptrdiff_t>(bin, 0, static_cast<std::ptrdiff_t>(bins) - 1);
-            out[static_cast<std::size_t>(bin)] += _counts[i];
+            const double from = _lower + (_width * static_cast<double>(i));
+            const double to = from + _width;
+            auto first = static_cast<std::ptrdiff_t>(std::floor((from - lower) / target_width));
+            auto last = static_cast<std::ptrdiff_t>(std::floor((to - lower) / target_width));
+            first = std::clamp<std::ptrdiff_t>(first, 0, last_bin);
+            last = std::clamp<std::ptrdiff_t>(last, 0, last_bin);
+            if (first == last) {
+                out[static_cast<std::size_t>(first)] += count;
+                continue;
+            }
+
+            // Normalised by what the target range actually covers, not by the provisional width: a
+            // bin hanging over either end would otherwise leave a remainder the size of the part
+            // outside, and those pixels are inside the range by construction.
+            shares.assign(static_cast<std::size_t>(last - first + 1), 0.0);
+            double covered = 0.0;
+            for (std::ptrdiff_t bin = first; bin <= last; ++bin) {
+                const double low = std::max(from, lower + (target_width * static_cast<double>(bin)));
+                const double high = std::min(to, lower + (target_width * static_cast<double>(bin + 1)));
+                const double piece = high > low ? high - low : 0.0;
+                shares[static_cast<std::size_t>(bin - first)] = piece;
+                covered += piece;
+            }
+            if (!(covered > 0.0)) {
+                out[static_cast<std::size_t>(first)] += count;
+                continue;
+            }
+
+            std::uint64_t placed = 0;
+            for (std::size_t offset = 0; offset < shares.size(); ++offset) {
+                const double share = static_cast<double>(count) * (shares[offset] / covered);
+                const auto whole = static_cast<std::uint64_t>(share);
+                out[static_cast<std::size_t>(first) + offset] += whole;
+                placed += whole;
+                // Reused as the fractional part, which is what decides who gets the leftovers.
+                shares[offset] = share - static_cast<double>(whole);
+            }
+            while (placed < count) {
+                std::size_t best = 0;
+                for (std::size_t offset = 1; offset < shares.size(); ++offset) {
+                    if (shares[offset] > shares[best]) {
+                        best = offset;
+                    }
+                }
+                ++out[static_cast<std::size_t>(first) + best];
+                shares[best] = -1.0;
+                ++placed;
+            }
         }
         return out;
     }
@@ -554,8 +611,12 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const Store& store, const Image
         return valid.error();
     }
 
-    std::size_t provisional =
-        request.provisional_bins == 0 ? kDefaultProvisionalBins : request.provisional_bins;
+    std::size_t provisional = request.provisional_bins;
+    if (provisional == 0) {
+        provisional = std::clamp<std::size_t>(
+            static_cast<std::size_t>(request.bins) * kProvisionalBinsPerBin, kLeastProvisionalBins,
+            kMostProvisionalBins);
+    }
     provisional = std::min<std::size_t>(provisional, kMaxHistogramBins);
     std::size_t rounded = 2;
     while (rounded < provisional) {
