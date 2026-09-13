@@ -668,18 +668,62 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const Store& store, const Image
     const std::size_t max_tasks = std::min(workers.size(), by_cache);
     std::vector<Accumulator> accumulators(max_tasks, Accumulator(provisional));
 
-    CubeHistogramResult result;
-    result.minimum = std::numeric_limits<double>::infinity();
-    result.maximum = -std::numeric_limits<double>::infinity();
-    result.sampled = request.spatial_sample > 1;
+    // The answer over whatever the accumulators hold, which is what the walk returns at the end and
+    // what it hands a caller that asks for a snapshot part of the way through. The two are the same
+    // thing: the extremes are exact for the pixels read so far, so the grid to re-aggregate onto is
+    // known at any point, not only at the last one.
+    //
+    // Safe to call from the progress hook because that runs between reads, with every worker done
+    // and nothing touching an accumulator.
+    const auto collect = [&]() {
+        CubeHistogramResult result;
+        result.minimum = std::numeric_limits<double>::infinity();
+        result.maximum = -std::numeric_limits<double>::infinity();
+        result.sampled = request.spatial_sample > 1;
+        for (const auto& accumulator : accumulators) {
+            result.num_pixels += accumulator.num_pixels;
+            result.nan_count += accumulator.nan_count;
+            result.sum += accumulator.sum;
+            result.sum_sq += accumulator.sum_sq;
+            result.minimum = std::min(result.minimum, accumulator.minimum);
+            result.maximum = std::max(result.maximum, accumulator.maximum);
+        }
+
+        result.counts.assign(request.bins, 0);
+        if (result.num_pixels == 0.0) {
+            result.minimum = std::numeric_limits<double>::quiet_NaN();
+            result.maximum = std::numeric_limits<double>::quiet_NaN();
+            return result;
+        }
+
+        // Each accumulator re-aggregates onto the same target grid and the counts are added. No two
+        // provisional histograms are ever merged with each other, which is what makes their ranges
+        // having drifted apart not a problem: the grid they all land on comes from the extremes, and
+        // those are exact. An accumulator that saw nothing contributes zeros.
+        for (const auto& accumulator : accumulators) {
+            const auto part = accumulator.growing.Aggregate(request.bins, result.minimum, result.maximum);
+            for (std::size_t bin = 0; bin < result.counts.size(); ++bin) {
+                result.counts[bin] += part[bin];
+            }
+        }
+        return result;
+    };
 
     std::uint64_t chunks_done = 0;
     const auto walked = WalkChannels(
         walk, 0, request.spectral.count, chunks_done,
         [&](std::uint64_t done) -> Result<void> {
-            if (request.progress &&
-                !request.progress(static_cast<double>(done) / static_cast<double>(total_chunks))) {
-                return MakeError(ErrorCode::cancelled, "The histogram was cancelled by its caller", node);
+            if (request.progress) {
+                CubeHistogramProgress update;
+                update.progress = static_cast<double>(done) / static_cast<double>(total_chunks);
+                // By reference and lazily: re-aggregating on every read would cost more than the
+                // binning does on a cube with thousands of them, and a caller that only draws a bar
+                // never asks.
+                update.snapshot = collect;
+                if (!request.progress(update)) {
+                    return MakeError(ErrorCode::cancelled, "The histogram was cancelled by its caller",
+                                     node);
+                }
             }
             return {};
         },
@@ -749,34 +793,7 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const Store& store, const Image
         return walked.error();
     }
 
-    for (const auto& accumulator : accumulators) {
-        result.num_pixels += accumulator.num_pixels;
-        result.nan_count += accumulator.nan_count;
-        result.sum += accumulator.sum;
-        result.sum_sq += accumulator.sum_sq;
-        result.minimum = std::min(result.minimum, accumulator.minimum);
-        result.maximum = std::max(result.maximum, accumulator.maximum);
-    }
-
-    if (result.num_pixels == 0.0) {
-        result.minimum = std::numeric_limits<double>::quiet_NaN();
-        result.maximum = std::numeric_limits<double>::quiet_NaN();
-        result.counts.assign(request.bins, 0);
-        return result;
-    }
-
-    // Each accumulator re-aggregates onto the same target grid and the counts are added. No two
-    // provisional histograms are ever merged with each other, which is what makes their ranges
-    // having drifted apart not a problem: the grid they all land on comes from the extremes, and
-    // those are exact. An accumulator that saw nothing contributes zeros.
-    result.counts.assign(request.bins, 0);
-    for (const auto& accumulator : accumulators) {
-        const auto part = accumulator.growing.Aggregate(request.bins, result.minimum, result.maximum);
-        for (std::size_t bin = 0; bin < result.counts.size(); ++bin) {
-            result.counts[bin] += part[bin];
-        }
-    }
-    return result;
+    return collect();
 }
 
 }  // namespace carta::zarr::internal

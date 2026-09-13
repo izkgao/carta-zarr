@@ -351,15 +351,71 @@ void TestOnePassRejectsAndCancels(const carta::zarr::Image& sky) {
 
 }  // namespace
 
-// decode_threads sizes the worker pool that bins the pixels as well as TensorStore's read pool, so
-// the same question asked of two differently sized pools must come back with the same counts. This
-// fixture is far below the split's threshold, so what this pins is the wiring rather than the
-// split itself -- work_pool_test covers the split, which no fixture this small can reach.
+// The walk reports as it goes, and what it reports is a histogram of what it has read rather than a
+// number on its own. A small read budget is what makes the fixture take more than one read, which
+// is what makes it report at all.
+void TestOnePassReportsWhatItHasSoFar(const carta::zarr::Image& sky) {
+    carta::zarr::ReadOptions options;
+    options.temporary_memory_limit_bytes = 1;
+
+    carta::zarr::CubeHistogramRequest request;
+    request.spectral = {0, kFrequency, 1};
+    request.polarization = 1;
+    request.bins = 12;
+
+    std::size_t updates = 0;
+    double last_progress = -1.0;
+    double last_pixels = -1.0;
+    double widest_low = std::numeric_limits<double>::infinity();
+    double widest_high = -std::numeric_limits<double>::infinity();
+    request.progress = [&](const carta::zarr::CubeHistogramProgress& update) {
+        ++updates;
+        Require(update.progress > last_progress, "progress should not go backwards");
+        Require(update.progress >= 0.0 && update.progress <= 1.0, "progress should be a fraction");
+        last_progress = update.progress;
+
+        const auto snapshot = update.snapshot();
+        std::uint64_t total = 0;
+        for (const auto count : snapshot.counts) {
+            total += count;
+        }
+        Require(snapshot.counts.size() == request.bins, "a snapshot should have the bins that were asked for");
+        Require(static_cast<double>(total) == snapshot.num_pixels,
+                "a snapshot's bins should hold every pixel it has counted");
+        Require(snapshot.num_pixels >= last_pixels, "a snapshot cannot un-read a pixel");
+        last_pixels = snapshot.num_pixels;
+        if (snapshot.num_pixels > 0.0) {
+            // The range only ever widens, because it is the extremes of a growing set of pixels.
+            Require(snapshot.minimum <= widest_low || widest_low == std::numeric_limits<double>::infinity(),
+                    "a snapshot's minimum should only fall");
+            Require(snapshot.maximum >= widest_high || widest_high == -std::numeric_limits<double>::infinity(),
+                    "a snapshot's maximum should only rise");
+            widest_low = std::min(widest_low, snapshot.minimum);
+            widest_high = std::max(widest_high, snapshot.maximum);
+        }
+        return true;
+    };
+
+    const auto result = sky.ComputeCubeHistogram(request, options);
+    Require(static_cast<bool>(result), "the one-pass histogram failed");
+    Require(updates > 0, "a walk taking several reads should have reported at least once");
+    Require(result.value().num_pixels >= last_pixels, "the answer should hold at least what the last snapshot did");
+    Require(result.value().minimum <= widest_low && result.value().maximum >= widest_high,
+            "the answer's range should contain every range reported on the way");
+
+    // Saying no stops the walk, and says why.
+    request.progress = [](const carta::zarr::CubeHistogramProgress&) { return false; };
+    const auto cancelled = sky.ComputeCubeHistogram(request, options);
+    Require(!cancelled && cancelled.error().code == carta::zarr::ErrorCode::cancelled,
+            "refusing a progress update should cancel the walk");
+}
+
 // What one pass promises whatever the thread count is. Not the counts: each worker keeps a
-// provisional histogram of its own and re-aggregates it onto the target grid at the end, so a
-// provisional bin straddling a target edge can go to a different side than it did on one thread.
-// The extremes, the totals and the sums are the parts the loader turns into a BasicStats, and those
-// hold exactly -- except the sums, which are re-associated and so agree only to a rounding.
+// provisional histogram of its own, seeded from the first pixel it happened to see, and
+// re-aggregates it onto the target grid at the end, so where a split provisional bin's odd pixel
+// lands can differ. The extremes, the totals and the sums are the parts the loader turns into a
+// BasicStats, and those hold exactly -- except the sums, which are re-associated and so agree only
+// to a rounding.
 void TestOnePassKeepsItsContractAtAnyThreadCount(const char* fixture) {
     std::vector<carta::zarr::CubeHistogramResult> answers;
     for (const unsigned int threads : {1U, 2U, 8U}) {
@@ -393,6 +449,10 @@ void TestOnePassKeepsItsContractAtAnyThreadCount(const char* fixture) {
     }
 }
 
+// decode_threads sizes the worker pool that bins the pixels as well as TensorStore's read pool, so
+// the same question asked of two differently sized pools must come back with the same counts. This
+// fixture is far below the split's threshold, so what this pins is the wiring rather than the
+// split itself -- work_pool_test covers the split, which no fixture this small can reach.
 void TestThreadCountDoesNotChangeTheCounts(const char* fixture) {
     std::vector<std::vector<std::uint64_t>> answers;
     for (const unsigned int threads : {1U, 2U, 8U}) {
@@ -427,6 +487,7 @@ int main() {
             TestSamplingTakesFewerPixels(sky);
             TestOnePassRejectsAndCancels(sky);
             TestThreadCountDoesNotChangeTheCounts(fixture);
+            TestOnePassReportsWhatItHasSoFar(sky);
             TestOnePassKeepsItsContractAtAnyThreadCount(fixture);
         } catch (const std::exception& error) {
             std::cerr << "histogram test failed on " << fixture << ": " << error.what() << "\n";

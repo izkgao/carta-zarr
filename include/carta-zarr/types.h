@@ -436,6 +436,36 @@ struct HistogramBlock {
 
 using HistogramSink = std::function<bool(const HistogramBlock&)>;
 
+// Everything one pass can say about the selection.
+struct CubeHistogramResult {
+    double num_pixels = 0.0;
+    double nan_count = 0.0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    // Exact, whatever the bin edges did. NaN when nothing finite was read.
+    double minimum = 0.0;
+    double maximum = 0.0;
+    // `bins` counts over [minimum, maximum].
+    std::vector<std::uint64_t> counts;
+    // Whether spatial_sample kept this from being every pixel.
+    bool sampled = false;
+};
+
+// What the walk hands the caller as it goes.
+//
+// `snapshot` answers over the pixels read so far, which is a legitimate histogram of them: the
+// extremes are tracked exactly as the walk runs, so the bin edges it re-aggregates onto are the
+// right ones for what it has seen. They move as more of the cube arrives, which is why it hands
+// back a whole result rather than counts alone -- the caller needs the range that goes with them.
+//
+// It is not free: it re-aggregates every worker's provisional histogram. A caller reporting on a
+// timer should call it only when it reports, not on every update.
+struct CubeHistogramProgress {
+    // The fraction of the walk's chunks that are done.
+    double progress = 0.0;
+    std::function<CubeHistogramResult()> snapshot;
+};
+
 // One histogram for the whole selection in a single pass, for a caller that does not know the range
 // in advance.
 //
@@ -478,25 +508,11 @@ struct CubeHistogramRequest {
     // because a chunk comes back whole however few of its pixels are wanted. It pays when it steps
     // over whole chunks.
     std::uint64_t spatial_sample = 1;
-    // Called as the walk advances, with the fraction of its chunks that are done. Returning false
-    // cancels.
-    std::function<bool(double progress)> progress;
+    // Called as the walk advances, once per read. Returning false cancels. See
+    // CubeHistogramProgress for what it can ask for besides the fraction done.
+    std::function<bool(const CubeHistogramProgress&)> progress;
 };
 
-// Everything one pass can say about the selection.
-struct CubeHistogramResult {
-    double num_pixels = 0.0;
-    double nan_count = 0.0;
-    double sum = 0.0;
-    double sum_sq = 0.0;
-    // Exact, whatever the bin edges did. NaN when nothing finite was read.
-    double minimum = 0.0;
-    double maximum = 0.0;
-    // `bins` counts over [minimum, maximum].
-    std::vector<std::uint64_t> counts;
-    // Whether spatial_sample kept this from being every pixel.
-    bool sampled = false;
-};
 
 // The provisional resolution a cube histogram bins at when the caller does not choose one.
 //
