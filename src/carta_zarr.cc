@@ -398,7 +398,8 @@ Result<void> Image::ReduceSpectral(const SpectralReduceRequest& request, const S
     if (!_impl || !_impl->store) {
         return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
     }
-    return internal::ReduceSpectral(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options);
+    return internal::ReduceSpectral(*_impl->store, _impl->descriptor, _impl->geometry, request, sink, options,
+                                    *_impl->context->workers);
 }
 
 Result<void> Image::ComputeHistogram(const HistogramRequest& request, const HistogramSink& sink) const {

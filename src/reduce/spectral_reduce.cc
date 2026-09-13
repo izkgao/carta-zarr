@@ -388,7 +388,7 @@ std::vector<std::vector<ColumnRun>> BuildColumnRuns(const ChunkBuckets& buckets)
 
 Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descriptor,
                             const ChunkGeometry& geometry, const SpectralReduceRequest& request,
-                            const SpectralSink& sink, const ReadOptions& options) {
+                            const SpectralSink& sink, const ReadOptions& options, WorkPool& workers) {
     const auto& node = descriptor.id;
     if (!sink) {
         return MakeError(ErrorCode::invalid_argument, "A spectral reduction needs a sink", node);
@@ -513,8 +513,16 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                                                    : static_cast<std::uint64_t>(request.emit_every_channels),
                   budget_channels, spectral.count});
 
+    // Below this a unit is not worth its share of a dispatch, so the reduction runs in place. A
+    // unit is one chunk cell of one channel, so this is a statement about chunk size: an image
+    // whose chunks are smaller than this bins on the calling thread, which is the right answer for
+    // the fixtures and for a cursor-sized region.
+    constexpr std::uint64_t kLeastPixelsPerUnit = 1U << 16U;
+
     const auto rank = descriptor.axes.size();
     std::vector<double> accumulator;
+    // One private accumulator per task, reused across slabs. See the dispatch below.
+    std::vector<double> sinks;
     std::vector<float> pixels;
     std::vector<std::uint8_t> mask;
     std::vector<ColumnRun> segments;
@@ -734,17 +742,30 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                         }
                     }
 
-                    for (std::uint64_t channel = 0; channel < slab_length; ++channel) {
-                        const auto out_channel = static_cast<std::size_t>(slab_begin - block_begin + channel);
+                    const std::uint64_t cv_span = chunk_cv_end - chunk_cv_begin;
+                    const std::uint64_t cu_span = chunk_cu_end - chunk_cu_begin;
+                    const std::uint64_t cells = std::max<std::uint64_t>(1, cv_span * cu_span);
+                    const std::uint64_t units = slab_length * cells;
+                    const std::size_t sink_region_stride =
+                        statistic_count * static_cast<std::size_t>(slab_length);
+                    const std::size_t sink_stride =
+                        std::max<std::size_t>(1, request.region_count * sink_region_stride);
+
+                    // One (channel, chunk cell) unit of the accumulation, into a private sink laid
+                    // out [region][statistic][channel within this slab]. Private because two units
+                    // of the same channel can touch the same region -- a region wider than a chunk
+                    // spans several cells -- so they would otherwise be adding to one double.
+                    const auto accumulate_unit = [&](std::uint64_t channel, std::uint64_t cell_cv,
+                                                     std::uint64_t cell_cu, double* sink) {
                         const float* plane = pixels.data() + (channel * stride_z);
 
-                        for (std::uint64_t chunk_cv = chunk_cv_begin; chunk_cv < chunk_cv_end; ++chunk_cv) {
+                        for (std::uint64_t chunk_cv = cell_cv; chunk_cv < cell_cv + 1; ++chunk_cv) {
                             const std::uint64_t cell_v0 = std::max(v_begin, chunk_cv * chunk_v);
                             const std::uint64_t cell_v1 = std::min(v_end, (chunk_cv + 1) * chunk_v);
                             if (cell_v0 >= cell_v1) {
                                 continue;
                             }
-                            for (std::uint64_t chunk_cu = chunk_cu_begin; chunk_cu < chunk_cu_end; ++chunk_cu) {
+                            for (std::uint64_t chunk_cu = cell_cu; chunk_cu < cell_cu + 1; ++chunk_cu) {
                                 const std::uint64_t cell_u0 = std::max(u_begin, chunk_cu * chunk_u);
                                 const std::uint64_t cell_u1 = std::min(u_end, (chunk_cu + 1) * chunk_u);
                                 if (cell_u0 >= cell_u1) {
@@ -765,7 +786,7 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                                         continue;
                                     }
 
-                                    double* out = accumulator.data() + (r * region_stride);
+                                    double* out = sink + (r * sink_region_stride);
                                     for (std::uint64_t y = rv0; y < rv1; ++y) {
                                         RowTotals totals;
                                         if (region.runs != nullptr) {
@@ -825,33 +846,94 @@ Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descripto
                                         }
 
                                         if (slot_num_pixels >= 0) {
-                                            out[(static_cast<std::size_t>(slot_num_pixels) * statistic_stride) +
-                                                out_channel] += static_cast<double>(totals.good);
+                                            out[(static_cast<std::size_t>(slot_num_pixels) * slab_length) + channel] += static_cast<double>(totals.good);
                                         }
                                         if (slot_nan_count >= 0) {
-                                            out[(static_cast<std::size_t>(slot_nan_count) * statistic_stride) +
-                                                out_channel] += static_cast<double>(totals.bad);
+                                            out[(static_cast<std::size_t>(slot_nan_count) * slab_length) + channel] += static_cast<double>(totals.bad);
                                         }
                                         if (slot_sum >= 0) {
-                                            out[(static_cast<std::size_t>(slot_sum) * statistic_stride) +
-                                                out_channel] += totals.sum;
+                                            out[(static_cast<std::size_t>(slot_sum) * slab_length) + channel] += totals.sum;
                                         }
                                         if (slot_sum_sq >= 0) {
-                                            out[(static_cast<std::size_t>(slot_sum_sq) * statistic_stride) +
-                                                out_channel] += totals.sum_sq;
+                                            out[(static_cast<std::size_t>(slot_sum_sq) * slab_length) + channel] += totals.sum_sq;
                                         }
                                         if (slot_min >= 0) {
                                             double& current =
-                                                out[(static_cast<std::size_t>(slot_min) * statistic_stride) +
-                                                    out_channel];
+                                                out[(static_cast<std::size_t>(slot_min) * slab_length) + channel];
                                             current = std::min(current, totals.smallest);
                                         }
                                         if (slot_max >= 0) {
                                             double& current =
-                                                out[(static_cast<std::size_t>(slot_max) * statistic_stride) +
-                                                    out_channel];
+                                                out[(static_cast<std::size_t>(slot_max) * slab_length) + channel];
                                             current = std::max(current, totals.largest);
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    // The unit order is the order the nested loops used to run in -- channel, then
+                    // chunk row, then chunk column -- so a single task reproduces the old sums bit
+                    // for bit. Several tasks do not: each one sums its own units and the partials
+                    // are added in task order, which is deterministic but a different association.
+                    // The statistics are doubles over as many as 5x10^11 values, and partial sums
+                    // are if anything the more accurate arrangement; the tests compare to 1e-9
+                    // relative for exactly this reason, and the counts and extrema are unaffected
+                    // because integers and min/max do not care what order they arrive in.
+                    // A sink per task, so the split is also an allocation and a memset of this size
+                    // once per slab. Capped so that a reduction over thousands of regions does not
+                    // spend more on the split than on the pixels.
+                    constexpr std::size_t kSinkBudgetBytes = 16U << 20U;
+                    const std::size_t tasks_by_memory =
+                        std::max<std::size_t>(1, kSinkBudgetBytes / (sink_stride * sizeof(double)));
+                    const std::size_t max_tasks = std::min(workers.size(), tasks_by_memory);
+                    const std::size_t tasks =
+                        PlanRowTasks(chunk_u * chunk_v, units, max_tasks, kLeastPixelsPerUnit);
+
+                    sinks.assign(tasks * sink_stride, 0.0);
+                    for (std::size_t task = 0; task < tasks; ++task) {
+                        for (std::size_t r = 0; r < request.region_count; ++r) {
+                            double* base = sinks.data() + (task * sink_stride) + (r * sink_region_stride);
+                            if (slot_min >= 0) {
+                                auto* from = base + (static_cast<std::size_t>(slot_min) * slab_length);
+                                std::fill(from, from + slab_length, kInfinity);
+                            }
+                            if (slot_max >= 0) {
+                                auto* from = base + (static_cast<std::size_t>(slot_max) * slab_length);
+                                std::fill(from, from + slab_length, -kInfinity);
+                            }
+                        }
+                    }
+
+                    workers.Run(tasks, [&](std::size_t task, std::size_t) {
+                        double* sink = sinks.data() + (task * sink_stride);
+                        for (std::uint64_t unit = task; unit < units; unit += tasks) {
+                            const std::uint64_t channel = unit / cells;
+                            const std::uint64_t cell = unit % cells;
+                            accumulate_unit(channel, chunk_cv_begin + (cell / cu_span),
+                                            chunk_cu_begin + (cell % cu_span), sink);
+                        }
+                    });
+
+                    for (std::size_t task = 0; task < tasks; ++task) {
+                        const double* sink = sinks.data() + (task * sink_stride);
+                        for (std::size_t r = 0; r < request.region_count; ++r) {
+                            for (std::size_t slot = 0; slot < statistic_count; ++slot) {
+                                const double* from =
+                                    sink + (r * sink_region_stride) + (slot * slab_length);
+                                double* to = accumulator.data() + (r * region_stride) +
+                                             (slot * statistic_stride) +
+                                             static_cast<std::size_t>(slab_begin - block_begin);
+                                const bool is_min = slot_min >= 0 && slot == static_cast<std::size_t>(slot_min);
+                                const bool is_max = slot_max >= 0 && slot == static_cast<std::size_t>(slot_max);
+                                for (std::uint64_t channel = 0; channel < slab_length; ++channel) {
+                                    if (is_min) {
+                                        to[channel] = std::min(to[channel], from[channel]);
+                                    } else if (is_max) {
+                                        to[channel] = std::max(to[channel], from[channel]);
+                                    } else {
+                                        to[channel] += from[channel];
                                     }
                                 }
                             }

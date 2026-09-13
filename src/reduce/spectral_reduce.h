@@ -10,6 +10,7 @@
 #include "carta-zarr/carta_zarr.h"
 
 #include "store.h"
+#include "work_pool.h"
 
 namespace carta::zarr::internal {
 
@@ -22,7 +23,7 @@ namespace carta::zarr::internal {
  */
 Result<void> ReduceSpectral(const Store& store, const ImageDescriptor& descriptor,
                             const ChunkGeometry& geometry, const SpectralReduceRequest& request,
-                            const SpectralSink& sink, const ReadOptions& options);
+                            const SpectralSink& sink, const ReadOptions& options, WorkPool& workers);
 
 }  // namespace carta::zarr::internal
 
