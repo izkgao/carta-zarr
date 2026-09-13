@@ -1,0 +1,87 @@
+{
+  "shape": [
+    1,
+    3,
+    2,
+    4,
+    5
+  ],
+  "data_type": "float32",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        1,
+        1,
+        1,
+        2,
+        5
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 1,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "units": "Jy/beam",
+    "type": "sky",
+    "flag": "MASK_0",
+    "object_name": "Zarr test source",
+    "observer": "CARTA",
+    "obsdate": {
+      "data": 59000.0,
+      "attrs": {
+        "format": "MJD",
+        "scale": "UTC"
+      }
+    },
+    "telescope": {
+      "name": "Test scope",
+      "direction": {
+        "data": [
+          0.0,
+          0.0
+        ]
+      },
+      "distance": {
+        "data": [
+          6371000.0
+        ]
+      }
+    },
+    "user": {
+      "origin": "zarr-python",
+      "exposure": 12.5
+    },
+    "beam_fit_params": "BEAM"
+  },
+  "dimension_names": [
+    "time",
+    "frequency",
+    "polarization",
+    "l",
+    "m"
+  ],
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

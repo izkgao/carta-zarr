@@ -175,7 +175,9 @@ def add_consolidated_metadata(path: Path) -> None:
     root_metadata_path.write_text(json.dumps(root_metadata, indent=2) + "\n")
 
 
-def generate_xradio_fixture(path: Path, *, typed: bool, consolidated: bool) -> None:
+def generate_xradio_fixture(
+    path: Path, *, typed: bool, consolidated: bool, uniform_beams: bool = False
+) -> None:
     root = zarr.open_group(store=path, mode="w", zarr_format=3)
     root.attrs.update(
         {
@@ -265,11 +267,21 @@ def generate_xradio_fixture(path: Path, *, typed: bool, consolidated: bool) -> N
     )
     parameter_labels.attrs.update({"dimension_names": ["beam_params_label"]})
 
+    # A table with one row per plane holding the same beam on every one of them is what a
+    # converter writes for an image that was restored with a single beam. It has to stay
+    # distinguishable from a table whose planes really differ, because a consumer that sees
+    # "multiple beams" reconciles them -- ImageMoments convolves the whole cube to a common
+    # beam first -- and doing that to planes that already agree costs a full copy of the cube
+    # for no change.
     beam_values = np.zeros((1, 3, 2, 3), dtype=np.float64)
     for channel in range(3):
         for stokes in range(2):
-            major = 2.0e-5 + (channel * 1.0e-6) + (stokes * 1.0e-7)
-            beam_values[0, channel, stokes] = (major / 2.0, 0.1 + channel * 0.01, major)
+            if uniform_beams:
+                major = 2.0e-5
+                beam_values[0, channel, stokes] = (major / 2.0, 0.1, major)
+            else:
+                major = 2.0e-5 + (channel * 1.0e-6) + (stokes * 1.0e-7)
+                beam_values[0, channel, stokes] = (major / 2.0, 0.1 + channel * 0.01, major)
     create_numeric_array(
         path / "BEAM",
         beam_values,
@@ -596,6 +608,7 @@ def main() -> None:
     for owned in (
         "string",
         "xradio/minimal",
+        "xradio/uniform_beam",
         "xradio/legacy",
         "xradio/pixels",
         "xradio/pixels_l_fastest",
@@ -606,6 +619,9 @@ def main() -> None:
     generate_string_fixtures()
     generate_xradio_fixture(OUTPUT_DIR / "xradio" / "minimal", typed=True, consolidated=True)
     generate_xradio_fixture(OUTPUT_DIR / "xradio" / "legacy", typed=False, consolidated=False)
+    generate_xradio_fixture(
+        OUTPUT_DIR / "xradio" / "uniform_beam", typed=True, consolidated=True, uniform_beams=True
+    )
     generate_pixel_fixture(OUTPUT_DIR / "xradio" / "pixels")
     generate_pixel_fixture(OUTPUT_DIR / "xradio" / "pixels_l_fastest", l_fastest=True)
     generate_wide_pixel_fixture(OUTPUT_DIR / "xradio" / "pixels_wide")

@@ -1,0 +1,54 @@
+{
+  "shape": [
+    3
+  ],
+  "data_type": "float64",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        3
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 1,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "reference_frequency": {
+      "data": 1401000000.0,
+      "attrs": {
+        "units": "Hz",
+        "observer": "lsrk"
+      }
+    },
+    "rest_frequency": {
+      "data": 1420405751.0
+    }
+  },
+  "dimension_names": [
+    "frequency"
+  ],
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}
