@@ -35,11 +35,22 @@ Result<void> ComputeHistogram(const Store& store, const ImageDescriptor& descrip
 
 /**
  * One histogram for the whole selection in a single pass. See CubeHistogramRequest.
+ *
+ * `workers` splits the same way, by rows of a plane, but each one keeps a provisional histogram of
+ * its own for the whole walk rather than for one plane: a growing histogram's range is what it has
+ * learned from the pixels it has seen, and handing that back between planes would make it learn the
+ * range again on every one.
+ *
+ * They are never merged with each other. The extremes are tracked exactly, so by the end the target
+ * bin edges are known and each worker re-aggregates onto them independently. That leaves the same
+ * error the serial pass already has -- a provisional bin straddling a target edge goes to one side
+ * -- once per worker instead of once, which is why this is the one reduction here whose counts are
+ * not the serial answer exactly.
  */
 Result<CubeHistogramResult> ComputeCubeHistogram(const Store& store, const ImageDescriptor& descriptor,
                                                  const ChunkGeometry& geometry,
                                                  const CubeHistogramRequest& request,
-                                                 const ReadOptions& options);
+                                                 const ReadOptions& options, WorkPool& workers);
 
 }  // namespace carta::zarr::internal
 

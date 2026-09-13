@@ -424,7 +424,8 @@ Result<CubeHistogramResult> Image::ComputeCubeHistogram(const CubeHistogramReque
     if (!_impl || !_impl->store) {
         return MakeError(ErrorCode::invalid_argument, "Image handle is empty");
     }
-    return internal::ComputeCubeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, options);
+    return internal::ComputeCubeHistogram(*_impl->store, _impl->descriptor, _impl->geometry, request, options,
+                                          *_impl->context->workers);
 }
 
 Result<std::vector<Beam>> Image::ReadBeams() const {

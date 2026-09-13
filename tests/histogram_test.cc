@@ -355,6 +355,44 @@ void TestOnePassRejectsAndCancels(const carta::zarr::Image& sky) {
 // the same question asked of two differently sized pools must come back with the same counts. This
 // fixture is far below the split's threshold, so what this pins is the wiring rather than the
 // split itself -- work_pool_test covers the split, which no fixture this small can reach.
+// What one pass promises whatever the thread count is. Not the counts: each worker keeps a
+// provisional histogram of its own and re-aggregates it onto the target grid at the end, so a
+// provisional bin straddling a target edge can go to a different side than it did on one thread.
+// The extremes, the totals and the sums are the parts the loader turns into a BasicStats, and those
+// hold exactly -- except the sums, which are re-associated and so agree only to a rounding.
+void TestOnePassKeepsItsContractAtAnyThreadCount(const char* fixture) {
+    std::vector<carta::zarr::CubeHistogramResult> answers;
+    for (const unsigned int threads : {1U, 2U, 8U}) {
+        carta::zarr::OpenOptions options;
+        options.decode_threads = threads;
+        const auto sky = OpenSky(fixture, options);
+        carta::zarr::CubeHistogramRequest request;
+        request.spectral = {0, kFrequency, 1};
+        request.polarization = 1;
+        request.bins = 12;
+        auto result = sky.ComputeCubeHistogram(request);
+        Require(static_cast<bool>(result), "the one-pass histogram failed");
+        answers.push_back(std::move(result.value()));
+    }
+    const auto& first = answers.front();
+    for (const auto& answer : answers) {
+        Require(answer.num_pixels == first.num_pixels, "the finite pixel count must not move with the threads");
+        Require(answer.nan_count == first.nan_count, "the absent pixel count must not move with the threads");
+        Require(answer.minimum == first.minimum, "the minimum must not move with the threads");
+        Require(answer.maximum == first.maximum, "the maximum must not move with the threads");
+        Require(std::abs(answer.sum - first.sum) <= 1e-12 * (1.0 + std::abs(first.sum)),
+                "the sum should agree to a rounding");
+        Require(std::abs(answer.sum_sq - first.sum_sq) <= 1e-12 * (1.0 + std::abs(first.sum_sq)),
+                "the sum of squares should agree to a rounding");
+        std::uint64_t total = 0;
+        for (const auto count : answer.counts) {
+            total += count;
+        }
+        Require(static_cast<double>(total) == answer.num_pixels,
+                "every finite pixel should still land in some bin, whoever binned it");
+    }
+}
+
 void TestThreadCountDoesNotChangeTheCounts(const char* fixture) {
     std::vector<std::vector<std::uint64_t>> answers;
     for (const unsigned int threads : {1U, 2U, 8U}) {
@@ -389,6 +427,7 @@ int main() {
             TestSamplingTakesFewerPixels(sky);
             TestOnePassRejectsAndCancels(sky);
             TestThreadCountDoesNotChangeTheCounts(fixture);
+            TestOnePassKeepsItsContractAtAnyThreadCount(fixture);
         } catch (const std::exception& error) {
             std::cerr << "histogram test failed on " << fixture << ": " << error.what() << "\n";
             return 1;
