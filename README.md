@@ -108,6 +108,8 @@ among them without opening any.
 - [docs/design.md](docs/design.md) — why the library is split from the backend the way it is.
 - [docs/read-api.md](docs/read-api.md) — the read and reduction API, and the reasoning behind its
   output types and streaming shape.
+- [docs/storage-tuning.md](docs/storage-tuning.md) — choosing a Zarr layout and carta-backend's reader
+  settings for Lustre or BeeGFS, what measurements found, and how to measure your own.
 - [docs/adr](docs/adr) — decisions and their alternatives.
 - [AGENTS.md](AGENTS.md) — building and testing without drowning in TensorStore's output.
 

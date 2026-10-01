@@ -2,6 +2,8 @@
 
 Tools for finding which Zarr layout, and which carta-zarr settings, read fastest on a given storage
 system -- Lustre and BeeGFS in particular, where the answer differs from a local disk.
+[`docs/storage-tuning.md`](../../docs/storage-tuning.md) says what they have found so far and how to
+read what they report; this page is how to run them.
 
 ## generate.py
 
