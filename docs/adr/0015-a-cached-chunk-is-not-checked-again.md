@@ -54,9 +54,10 @@ ran first and each preceded by an untimed run of its own:
 With eight users the two were within 4% in every layout and mode. There is no gain to see here.
 
 A first measurement showed one of 50% to 70%, and it was the order of the runs: whichever build ran
-second after the data caches were emptied was faster, because emptying them leaves the client's
-metadata -- its locks and its directory entries -- warm, and no ordinary user can empty those. That
-holds for any comparison of builds or settings on Lustre, the sweep's included.
+second after the data caches were emptied was faster. What carries over is not known. It is not the
+files' metadata -- opening every file first changed nothing -- nor any read an ordinary user can make
+before the run: only a run of the bench itself evened it out. It holds for any comparison of builds or
+settings on Lustre, which is why the sweep now runs the bench once, untimed, on every dataset.
 
 The cost of the check may yet show where this measurement could not see it: many clients on one
 metadata server, under load. Until it does, the change gives up the guarantee for nothing measured,
