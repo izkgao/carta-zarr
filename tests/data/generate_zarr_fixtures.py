@@ -503,9 +503,9 @@ def generate_wide_pixel_fixture(path: Path) -> None:
     """A pixel fixture large enough for the reductions to split the work.
 
     The other pixel fixtures are a few dozen pixels, which is the right size for pinning what a read
-    returns but is below every threshold the parallel paths have: a plane must hold more than 65,536
-    pixels before a histogram divides it between workers, and a chunk must before a spectral
-    reduction does. Everything those paths do -- the private accumulators, the merge, the split of a
+    returns but is below every threshold the parallel paths have: a plane must hold more than
+    kLeastPixelsPerTask pixels (src/reduce/tuning.h) before a histogram divides it between workers,
+    and a chunk must before a spectral reduction does. Everything those paths do -- the private accumulators, the merge, the split of a
     read across threads -- went untested on the small fixtures and was checked against real cubes by
     hand instead.
 

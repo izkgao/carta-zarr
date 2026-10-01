@@ -19,7 +19,8 @@ set(config "${OUTPUT_DIR}/sweep.toml")
 # one that is refused, two settings in stage 2, and validation over all four channels. The RAM check
 # is off, since nothing here is larger than RAM, and with it validation runs although caches stay warm.
 # Two channels are far too few for 16 planes a user to each read chunks of their own, so the report
-# must say so: that warning is checked for below.
+# must say so: that warning is checked for below. The warm stage compares the bench with itself, as a
+# variant that overrides nothing, which the report must also notice.
 file(WRITE "${config}" "
 [paths]
 bench = \"${BENCH}\"
@@ -47,6 +48,9 @@ top = 1
 io_threads = [2, 4]
 [checks]
 ram = false
+[warm]
+variants = [{ name = \"same\", bench = \"${BENCH}\" }]
+trials = 1
 ")
 
 function(sweep_run)
@@ -74,7 +78,7 @@ if(sweep_result)
 endif()
 
 file(READ "${results}/results.csv" rows)
-foreach(stage stage1 stage2 confirm validate)
+foreach(stage stage1 stage2 confirm validate warm-default warm-same)
     if(NOT rows MATCHES ",${stage},")
         message(FATAL_ERROR "results.csv has no ${stage} rows:\n${sweep_log}")
     endif()
@@ -92,7 +96,7 @@ foreach(section "## Conclusion" "## Machine and environment" "## Stage 1: layout
         "## Sensitivity to the number of users" "## Validation" "## Reference: one-pass cube histograms"
         "## Configuration" "--zarr_file_io_threads" "Skipped layout refused" "| binned |"
         "### animation" "### Plane against spectrum" "animation per frame" "Too few first touches for plane"
-        "first touches (2)")
+        "first touches (2)" "## Warm stage: tuning constants" "Tuning variant same has no overrides")
     string(FIND "${summary}" "${section}" found)
     if(found EQUAL -1)
         message(FATAL_ERROR "summary.md has no \"${section}\":\n${summary}")

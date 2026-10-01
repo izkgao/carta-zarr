@@ -347,6 +347,11 @@ void TestTheRunKeyIsTheSettings() {
             "the mode does not change the run key");
     Require(key != RowTemplate(options, Mode::plane, ColdMethod::off, facts, "run-a").run_key,
             "warm and cold share a run key");
+    // The library's tuning overrides are fixed when it is built, so a test sees only its own build's:
+    // that they are written down, and are what the build says.
+    Require(RowTemplate(options, Mode::plane, ColdMethod::off, facts, "run-a").tuning == CARTA_ZARR_BENCH_TUNING &&
+                CsvHeader().find(",tuning,") != std::string::npos,
+            "a row does not say which tuning overrides the library was built with");
 
     // A setting that shapes one mode moves that mode's key and no other's.
     auto wider = options;

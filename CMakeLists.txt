@@ -14,6 +14,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(CARTA_ZARR_BUILD_TESTS "Build carta-zarr tests" ON)
 option(CARTA_ZARR_BUILD_PACKAGE_TEST "Build the install-tree CMake consumer test" ON)
 option(CARTA_ZARR_BUILD_BENCH "Build the storage benchmark tools and their tests" OFF)
+set(CARTA_ZARR_TUNING_OVERRIDES "" CACHE STRING
+    "For measuring only: NAME=VALUE replacements for the machine-dependent constants of src/reduce/tuning.h (ADR 0014)")
 
 # TensorStore is a required private dependency: it is the storage backend of this library,
 # not an optional feature. Building without it would produce a library that cannot read
@@ -79,6 +81,13 @@ add_library(CARTA::zarr ALIAS carta_zarr)
 
 target_compile_features(carta_zarr PUBLIC cxx_std_17)
 target_compile_definitions(carta_zarr PRIVATE CARTA_ZARR_BUILDING_LIBRARY)
+include(cmake/TuningOverrides.cmake)
+carta_zarr_tuning_definitions("${CARTA_ZARR_TUNING_OVERRIDES}" CARTA_ZARR_TUNING_DEFINITIONS CARTA_ZARR_TUNING)
+if(CARTA_ZARR_TUNING_DEFINITIONS)
+    message(WARNING "carta-zarr is built with tuning overrides (${CARTA_ZARR_TUNING}), which are for "
+                    "measuring them: do not deploy this build")
+    target_compile_definitions(carta_zarr PRIVATE ${CARTA_ZARR_TUNING_DEFINITIONS})
+endif()
 target_include_directories(carta_zarr
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -445,6 +454,43 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
             src/work_pool.cc
             ${CARTA_ZARR_PASS_SOURCES}
         LIBRARIES Threads::Threads)
+
+    # The same reductions with the overridable constants of tuning.h at each extreme: a task for
+    # every pixel and room for every worker's accumulator, so that every split there is is taken, and
+    # no room for a second accumulator, so that none is. ADR 0014 lets these be replaced only because
+    # they decide how the work is divided and never what it answers, and these two check that claim:
+    # every answer reduce_synthetic_test.cc expects must come out the same either way.
+    foreach(extreme split_all split_none)
+        if(extreme STREQUAL "split_all")
+            set(least 1ull)
+            set(budget 1099511627776ull)
+        else()
+            set(least 4611686018427387904ull)
+            set(budget 1ull)
+        endif()
+        string(REPLACE "_" "-" suffix "${extreme}")
+        carta_zarr_add_test(carta_zarr_reduce_synthetic_${extreme}_tests INTERNAL
+            TEST_NAME carta-zarr-reduce-synthetic-${suffix}
+            SOURCES
+                tests/reduce_synthetic_test.cc
+                src/reduce/occupancy.cc
+                src/reduce/region_runs.cc
+                src/reduce/plane_histogram.cc
+                src/reduce/spectral_reduce.cc
+                src/work_pool.cc
+                ${CARTA_ZARR_PASS_SOURCES}
+            DEFINITIONS
+                CARTA_ZARR_TUNING_LEAST_PIXELS_PER_TASK=${least}
+                CARTA_ZARR_TUNING_SPECTRAL_PARTIAL_BUDGET_BYTES=${budget}
+                CARTA_ZARR_TUNING_HISTOGRAM_PARTIAL_BUDGET_BYTES=${budget}
+                CARTA_ZARR_TUNING_CUBE_ACCUMULATOR_CACHE_BYTES=${budget}
+            LIBRARIES Threads::Threads)
+    endforeach()
+
+    # What CARTA_ZARR_TUNING_OVERRIDES accepts, and how a bench row will describe it.
+    add_test(NAME carta-zarr-tuning-overrides
+        COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/tuning_overrides_test.cmake)
 
     carta_zarr_add_test(carta_zarr_chunk_blocks_tests INTERNAL
         TEST_NAME carta-zarr-chunk-blocks

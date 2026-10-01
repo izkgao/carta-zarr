@@ -25,7 +25,7 @@
 
 namespace carta::zarr::bench {
 
-inline constexpr int kCsvVersion = 3;
+inline constexpr int kCsvVersion = 4;
 
 // What a dataset's bench-manifest.json says, for the columns the library cannot answer. Empty for a
 // dataset the generator did not write, which the bench reads as well as any other.
@@ -47,6 +47,8 @@ struct Row {
     std::string host;
     std::string bench_commit;
     std::string build_type;
+    // The library's tuning overrides, "default" for none. See cmake/TuningOverrides.cmake.
+    std::string tuning;
     // The dataset.
     std::string dataset;
     std::string dataset_identity_hash;

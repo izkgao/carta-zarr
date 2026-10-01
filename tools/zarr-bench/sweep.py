@@ -21,6 +21,9 @@ Driven by a TOML file (see example-sweep.toml), in four stages that each write i
             the typical number: how much the choice for the target costs everyone else.
   validate  The recommended layout again, larger than RAM, at the recommended settings and the
             baseline: whether what a 50-100 GB copy with its caches emptied said still holds.
+  warm      Only when [warm] lists builds of carta-zarr-bench whose library replaces tuning
+            constants: each of them and the default build on the recommended layout and settings,
+            warm, for the reductions those constants divide. Reported, never recommended.
 
 summary.md says what to set and why. Every stage resumes: a run already in sweep-state.json is not
 repeated, and a bench interrupted part-way resumes from the CSV.
@@ -71,6 +74,8 @@ SACRIFICE = 1.25
 READ_BUDGET_GAIN = 0.10
 # How far validation may move a median before the report says the smaller copy misled.
 VALIDATE_DRIFT = 0.20
+# How much faster than the default build a tuning variant must make a mode before the report says so.
+TUNING_GAIN = 0.10
 
 # carta-backend's own defaults for the settings it has: --zarr_file_io_threads 2,
 # --zarr_data_copy_threads the OpenMP thread count (every logical core), --zarr_cache_size 1024 MiB.
@@ -93,6 +98,7 @@ DEFAULTS: dict[str, Any] = {
     "stage2": {"top": 2, "layouts": [], "trials": 0, "io_threads": [], "decode_threads": [], "cache_mib": [],
                "read_budget": ["0"]},
     "checks": {"ram": True, "space": True},
+    "warm": {"variants": [], "modes": ["region", "cube-histogram"], "trials": 0},
 }
 
 
@@ -160,6 +166,17 @@ def load_config(path: Path, assignments: list[str]) -> dict[str, Any]:
         raise SystemExit("users.target must be at least one")
     if not config["stage1"]["chunk"] and not config["stage1"]["layout"] and not source["path"]:
         raise SystemExit("stage1 has no layouts: give chunk values or [[stage1.layout]] entries")
+    names = set()
+    for variant in config["warm"]["variants"]:
+        if not isinstance(variant, dict) or set(variant) != {"name", "bench"}:
+            raise SystemExit("warm.variants: each is a table of name and bench, and nothing else")
+        if variant["name"] in names or variant["name"] == "default" or not re.fullmatch(r"[\w.-]+", variant["name"]):
+            raise SystemExit(f"warm.variants: {variant['name']!r} is not a name of its own (letters, digits, "
+                             "._-, and not \"default\")")
+        names.add(variant["name"])
+    for mode in config["warm"]["modes"]:
+        if mode not in MODES:
+            raise SystemExit(f"warm.modes: unknown mode {mode!r}")
     return config
 
 
@@ -504,10 +521,19 @@ class Run:
     modes: tuple[str, ...]
     trials: int
     histogram: str = "exact"
+    # For the warm stage: caches left as they are, and another build of the bench. Empty for the
+    # sweep's own.
+    cold: str = ""
+    bench: str = ""
 
     def key(self, dataset: str) -> str:
-        return (f"{self.stage}|{dataset}|{','.join(self.setting.key)}|users={self.users}|{self.histogram}|"
-                f"{','.join(self.modes)}|trials={self.trials}")
+        key = (f"{self.stage}|{dataset}|{','.join(self.setting.key)}|users={self.users}|{self.histogram}|"
+               f"{','.join(self.modes)}|trials={self.trials}")
+        if self.cold:
+            key += f"|cold={self.cold}"
+        if self.bench:
+            key += f"|bench={self.bench}"
+        return key
 
 
 class Sweep:
@@ -593,20 +619,39 @@ class Sweep:
         self.save()
         return path
 
-    def bench_run(self, path: Path, layout: Layout, run: Run, validate: bool) -> None:
+    def bench_command(self, path: Path, run: Run, csv_path: Path) -> list[str]:
         measure = self.config["measure"]
-        key = run.key(dataset_key(layout, validate))
+        cold = run.cold or measure["cold"]
         ops = ",".join(f"{mode}={count}" for mode, count in measure["ops"].items())
-        command = [self.bench, "run", str(path), "--csv", str(self.csv), "--resume", "--label", run.stage,
-                   "--mode", ",".join(run.modes), "--processes", str(run.users), "--trials", str(run.trials),
-                   "--seed", str(measure["seed"]), "--trial-timeout", str(measure["trial_timeout"]),
-                   "--cold", measure["cold"], "--region-fraction", str(measure["region_fraction"]),
+        command = [run.bench or self.bench, "run", str(path), "--csv", str(csv_path), "--resume", "--label",
+                   run.stage, "--mode", ",".join(run.modes), "--processes", str(run.users), "--trials",
+                   str(run.trials), "--seed", str(measure["seed"]), "--trial-timeout", str(measure["trial_timeout"]),
+                   "--cold", cold, "--region-fraction", str(measure["region_fraction"]),
                    "--animation-frames", str(measure["animation_frames"]),
                    "--histogram-method", run.histogram, *run.setting.bench_args()]
         if ops:
             command += ["--ops", ops]
-        if measure["drop_cache_cmd"]:
+        if measure["drop_cache_cmd"] and cold != "off":
             command += ["--drop-cache-cmd", measure["drop_cache_cmd"]]
+        return command
+
+    def warm_up(self, path: Path, layout: Layout, runs: list[Run]) -> None:
+        """Reads what the warm runs will, once and untimed, so that they find it in the page cache. Into
+        a CSV of its own under logs/, which no report reads, and again every time the dataset is
+        written again."""
+        warm = [run for run in runs if run.cold == "off"]
+        if not warm:
+            return
+        modes = tuple(dict.fromkeys(mode for run in warm for mode in run.modes))
+        run = Run("warm-up", warm[0].setting, max(run.users for run in warm), modes, 1, cold="off")
+        log(f"  warming {layout.name} up")
+        csv_path = self.logs / f"warm-up-{layout.name}-{int(time.time())}.csv"
+        with open(self.logs / f"warm-{layout.name}.log", "a") as stderr:
+            subprocess.run(self.bench_command(path, run, csv_path), stdout=subprocess.DEVNULL, stderr=stderr)
+
+    def bench_run(self, path: Path, layout: Layout, run: Run, validate: bool) -> None:
+        key = run.key(dataset_key(layout, validate))
+        command = self.bench_command(path, run, self.csv)
         log(f"  {run.stage}: {layout.name}, {run.users} user{'s' if run.users > 1 else ''}, "
             f"{run.setting.describe()}{'' if run.histogram == 'exact' else ', ' + run.histogram}")
         started = time.monotonic()
@@ -618,8 +663,8 @@ class Sweep:
         seconds = round(time.monotonic() - started, 1)
         if completed.returncode == 2:
             # A command line it refused: every run after this one would be refused the same way.
-            raise SystemExit(f"carta-zarr-bench refused its command line; see logs/{name}. Is {self.bench} "
-                             "built from the same commit as this script?")
+            raise SystemExit(f"carta-zarr-bench refused its command line; see logs/{name}. Is "
+                             f"{run.bench or self.bench} built from the same commit as this script?")
         if completed.returncode == 0:
             self.state["runs"][key] = {"seconds": seconds}
             self.save()
@@ -639,6 +684,7 @@ class Sweep:
         if path is None:
             return
         try:
+            self.warm_up(path, layout, pending)
             for run in pending:
                 self.bench_run(path, layout, run, validate)
         finally:
@@ -662,6 +708,32 @@ class Sweep:
             for method in measure["histogram_reference"]:
                 runs += [Run("stage1", self.baseline, users, ("cube-histogram",), measure["trials"], method)
                          for users in self.user_counts("stage1")]
+        return runs
+
+    def warm_variants(self) -> list[tuple[str, str]]:
+        """Each build the warm stage compares, the sweep's own first as "default"."""
+        variants = [("default", self.bench)]
+        return variants + [(entry["name"], str(Path(entry["bench"]).resolve()))
+                           for entry in self.config["warm"]["variants"]]
+
+    def warm_methods(self) -> list[str]:
+        """The cube histograms the warm stage times: the exact one, and the one-pass references, since
+        kCubeAccumulatorCacheBytes divides only those."""
+        if "cube-histogram" not in self.config["warm"]["modes"]:
+            return []
+        return ["exact"] + list(self.config["measure"]["histogram_reference"])
+
+    def warm_runs(self, setting: Setting) -> list[Run]:
+        warm = self.config["warm"]
+        trials = warm["trials"] or self.config["measure"]["trials"]
+        users = sorted({1, self.config["users"]["target"]})
+        runs = []
+        for name, bench in self.warm_variants():
+            for count in users:
+                runs.append(Run(f"warm-{name}", setting, count, tuple(warm["modes"]), trials, cold="off",
+                                bench="" if name == "default" else bench))
+                runs += [Run(f"warm-{name}", setting, count, ("cube-histogram",), trials, method, cold="off",
+                             bench="" if name == "default" else bench) for method in self.warm_methods()[1:]]
         return runs
 
     def stage2_runs(self) -> list[Run]:
@@ -790,6 +862,8 @@ class Results:
         self.commits: set[str] = set()
         # Each dataset's chunk shape, as the bench reports it: "time=1;frequency=16;...".
         self.chunk_shapes: dict[str, str] = {}
+        # The tuning overrides each label's rows were measured with, as carta-zarr-bench reports them.
+        self.tunings: dict[str, set[str]] = {}
         self.shapes: dict[str, str] = {}
         rows = []
         if sweep.csv.is_file():
@@ -812,6 +886,7 @@ class Results:
             self.cold_methods.add(row["cold_method"])
             self.cold_failures += row["cold_ok"] != "true" and row["cold_method"] != "off"
             self.build_types.add(row["build_type"])
+            self.tunings.setdefault(row["label"], set()).add(row.get("tuning") or "unknown")
             self.commits.add(row["bench_commit"])
             if row["status"] == "ok":
                 seconds, logical = float(row["seconds"]), int(row["logical_bytes"])
@@ -829,7 +904,9 @@ class Results:
             if row["status"] == "ok" and row["checksum"] and not dataset.startswith("validate|"):
                 where = (row["mode"], method, row["processes"], row["trial"], row["process_index"], row["op_index"],
                          row["position"], row["shape"])
-                checksums.setdefault(where, {})[dataset] = row["checksum"]
+                # Tuning variants read one dataset, and must read it alike too.
+                source = f"{dataset} {row['label']}" if row["label"].startswith("warm-") else dataset
+                checksums.setdefault(where, {})[source] = row["checksum"]
         for (key, _), end in trial_ends.items():
             self.groups[key].makespans.append(end)
         # A comparison is ranked one way throughout: on every operation, if any group in it has to be.
@@ -1007,6 +1084,9 @@ def run_sweep(sweep: Sweep, layouts: list[Layout]) -> None:
                 for setting in dict.fromkeys([after.setting, sweep.baseline])]
         sweep.measure(after.layout, runs, validate=True)
 
+    if after and sweep.config["warm"]["variants"]:
+        sweep.measure(after.layout, sweep.warm_runs(after.setting))
+
 
 def validation_possible(config: dict[str, Any]) -> tuple[bool, str]:
     if not has_validation(config):
@@ -1026,9 +1106,10 @@ def preflight(config: dict[str, Any]) -> list[str]:
     for tool in ("uv",):
         if not shutil.which(tool):
             problems.append(f"{tool} is not on the path; generate.py runs under it")
-    bench = Path(config["paths"]["bench"])
-    if not bench.is_file() or not os.access(bench, os.X_OK):
-        problems.append(f"{bench} is not an executable carta-zarr-bench")
+    benches = [config["paths"]["bench"]] + [variant["bench"] for variant in config["warm"]["variants"]]
+    for bench in map(Path, benches):
+        if not bench.is_file() or not os.access(bench, os.X_OK):
+            problems.append(f"{bench} is not an executable carta-zarr-bench")
     if config["source"]["path"] and not (Path(config["source"]["path"]) / "zarr.json").is_file():
         problems.append(f"{config['source']['path']} is not a zarr dataset")
     if config["checks"]["ram"] and not problems:
@@ -1060,6 +1141,10 @@ def dry_run(config: dict[str, Any], output: Path) -> int:
     print(f"each dataset: up to {bytes_text(size)} uncompressed; one exists at a time")
     if has_validation(config):
         print(f"validation dataset: up to {bytes_text(uncompressed_bytes(config, True))} uncompressed")
+    if config["warm"]["variants"]:
+        warm = sweep_like.warm_runs(sweep_like.baseline)
+        print(f"warm: {len(sweep_like.warm_variants())} builds x {len(warm) // len(sweep_like.warm_variants())} "
+              f"bench runs = {len(warm)} runs, on the recommended layout")
     durations = [entry["seconds"] for key, entry in sweep_like.state["runs"].items()
                  if key.startswith("stage1|") and f"users={config['users']['target']}|exact" in key]
     if durations:
@@ -1337,6 +1422,9 @@ def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout
     else:
         validation.append(f"Skipped: {why_not or 'no recommendation to validate'}.\n")
 
+    # Before the conclusion is assembled, since it adds to the warnings that head it.
+    warm = warm_section(sweep, analysis, after, warnings)
+
     # -- Assemble
     lines = [f"# Storage tuning: {machine.get('host', platform.node())}", "",
              f"Generated {datetime.datetime.now().isoformat(timespec='seconds')} by tools/zarr-bench/sweep.py.", ""]
@@ -1419,6 +1507,8 @@ def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout
     lines += ["## Validation", "",
               "The recommended layout again, larger than RAM, against the stage it was chosen in.", ""] + validation
 
+    lines += warm
+
     lines += ["## Reference: one-pass cube histograms", "",
               "ComputeCubeHistogram's single pass against the backend's exact two passes, at the baseline. Not "
               "recommended either way: it moves where the bin edges land.", ""]
@@ -1437,6 +1527,55 @@ def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout
     lines += ["## Configuration", "", "```toml", dump_config(config).rstrip(), "```", ""]
     (sweep.output / "summary.md").write_text("\n".join(lines))
     return warnings
+
+
+def warm_section(sweep: Sweep, analysis: Analysis, after: Choice | None, warnings: list[str]) -> list[str]:
+    """The tuning variants against the default build, and a warning for each that gains enough."""
+    config, results = sweep.config, analysis.results
+    if not config["warm"]["variants"]:
+        return []
+    lines = ["## Warm stage: tuning constants", "",
+             "Builds of carta-zarr-bench whose library replaces constants of src/reduce/tuning.h, against the "
+             "default build, on the recommended layout and settings with the data in the page cache. This is "
+             "evidence for ADR 0014, not a setting: the backend is built without overrides, and the report "
+             "never recommends one.", ""]
+    if not after:
+        return lines + ["Not run: there is no recommendation to run it on.", ""]
+    dataset = dataset_key(after.layout, False)
+    default_tuning = results.tunings.get("warm-default", set())
+    if default_tuning and default_tuning != {"default"}:
+        warnings.append(f"**The default build of the warm stage has tuning overrides** "
+                        f"({', '.join(sorted(default_tuning))}): paths.bench should be built without them.")
+    columns = [(mode, "exact") for mode in config["warm"]["modes"]] + [
+        ("cube-histogram", method) for method in sweep.warm_methods()[1:]]
+    rows = []
+    for name, _ in sweep.warm_variants():
+        label = f"warm-{name}"
+        tuning = ", ".join(sorted(results.tunings.get(label, set()))) or "–"
+        if name != "default" and results.tunings.get(label) == {"default"}:
+            warnings.append(f"**Tuning variant {name} has no overrides**: its bench was built like the default.")
+        for users in sorted({1, analysis.target}):
+            cells = [name, tuning.replace(",", ", "), str(users)]
+            for mode, method in columns:
+                stats = results.get(label, dataset, after.setting, users, mode, method)
+                base = results.get("warm-default", dataset, after.setting, users, mode, method)
+                if not stats:
+                    cells.append("–")
+                    continue
+                text = seconds_text(stats.median)
+                if name != "default" and base and stats.median > 0 and math.isfinite(base.median):
+                    gain = base.median / stats.median - 1
+                    text += f" ({gain * 100:+.0f}%)"
+                    if gain >= TUNING_GAIN:
+                        what = mode if method == "exact" else f"{mode} ({method})"
+                        warnings.append(f"**Tuning variant {name} makes {what} {gain * 100:.0f}% faster** with {users} "
+                                        f"user{'s' if users > 1 else ''} ({tuning}): evidence for ADR 0014, not a "
+                                        "setting to deploy.")
+                cells.append(text)
+            rows.append(cells)
+    lines += ["Medians, warm; in brackets, how much faster than the default build (positive is faster).", ""]
+    header = [mode if method == "exact" else f"{mode} ({method})" for mode, method in columns]
+    return lines + table(["variant", "overrides", "users"] + header, rows)
 
 
 def tradeoff_section(analysis: Analysis, ranking: list[tuple[Layout, float, float]]) -> list[str]:

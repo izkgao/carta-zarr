@@ -125,3 +125,20 @@ read_budget = ["0", "256M"]
 ram = true
 # Refuse to write a dataset where there is not room for it uncompressed.
 space = true
+
+[warm]
+# Builds of carta-zarr-bench whose library replaces constants of src/reduce/tuning.h, each measured
+# against paths.bench on the recommended layout and settings, warm, for the reductions those constants
+# divide. For deciding whether a constant should depend on the machine (ADR 0014), never for
+# deploying: the report does not recommend one. Empty skips the stage. The README shows how to build
+# them; for example:
+# variants = [
+#   { name = "cube-4m", bench = "/opt/zarr-bench-variants/cube-4m/bin/carta-zarr-bench" },
+#   { name = "tasks-16k", bench = "/opt/zarr-bench-variants/tasks-16k/bin/carta-zarr-bench" },
+# ]
+variants = []
+# cube-histogram is timed exact, as the backend computes it, and in each of measure.histogram_reference,
+# the one-pass methods kCubeAccumulatorCacheBytes divides.
+modes = ["region", "cube-histogram"]
+# Trials per build, 0 for measure.trials.
+trials = 0

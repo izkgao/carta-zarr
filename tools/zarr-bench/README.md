@@ -137,6 +137,9 @@ It works in four stages, each written into one `results.csv` under its own label
    user and with `users.typical`: what choosing for the peak costs everyone else.
 4. **validate** writes the recommended layout again from `validate_crop`, larger than RAM, and checks
    that what the smaller copy said still holds. It needs caches that can be emptied.
+5. **warm**, only when `[warm]` lists builds of the bench with [tuning overrides](#tuning-constants),
+   measures each against the default build on the recommended layout and settings, with the data in
+   the page cache. It is reported and never recommended.
 
 `summary.md` opens with the settings to give carta-backend -- as flags and as `settings.json` -- for
 the data as it is, and for once it is in the recommended layout, and every warning: layouts that
@@ -164,6 +167,34 @@ that did not survive validation. The tables behind it follow.
 The output directory, `zarr-bench-results` beside the config unless `--output` says otherwise, holds
 `results.csv`, `summary.md`, `sweep-state.json`, `config.toml` (the configuration as run, every
 default filled in), `machine.json`, and a log per stage and layout under `logs/`.
+
+## Tuning constants
+
+A few constants of the library's reductions -- how many pixels a task needs, and what the tasks'
+private accumulators may cost together -- were measured on one machine and depend on its caches and
+core count. They are not settings: the backend has no flag for them, and ADR 0014 records why. They
+can be replaced when the library is built, for measuring another value on another machine:
+
+```sh
+cmake -S carta-zarr -B build-tuning -DCMAKE_BUILD_TYPE=Release -DCARTA_ZARR_BUILD_BENCH=ON \
+    -DCARTA_ZARR_BUILD_TESTS=OFF
+for variant in cube-4m:CUBE_ACCUMULATOR_CACHE_BYTES=4194304 tasks-16k:LEAST_PIXELS_PER_TASK=16384; do
+    cmake build-tuning -DCARTA_ZARR_TUNING_OVERRIDES="${variant#*:}"
+    cmake --build build-tuning --target carta_zarr_bench -j
+    cmake --install build-tuning --prefix "/opt/zarr-bench-variants/${variant%%:*}"
+done
+```
+
+`CARTA_ZARR_TUNING_OVERRIDES` takes `NAME=VALUE` pairs separated by `;`, for `LEAST_PIXELS_PER_TASK`,
+`SPECTRAL_PARTIAL_BUDGET_BYTES`, `HISTOGRAM_PARTIAL_BUDGET_BYTES` and
+`CUBE_ACCUMULATOR_CACHE_BYTES`. Changing it rebuilds the library and not TensorStore, so a variant
+takes minutes. Each goes to a prefix of its own, because the bench finds its library beside it: a
+bench run against another build's library would write the wrong overrides into its rows. Every row
+has a `tuning` column saying which were in force, `default` for none.
+
+List the variants in `[warm]` and the sweep measures them against `paths.bench`, which must be built
+without overrides. The constants left out decide what a reduction answers rather than how fast, and
+cannot be replaced.
 
 ## Without root
 

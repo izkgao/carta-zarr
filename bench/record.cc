@@ -23,6 +23,9 @@
 #ifndef CARTA_ZARR_BENCH_BUILD_TYPE
 #define CARTA_ZARR_BENCH_BUILD_TYPE "unknown"
 #endif
+#ifndef CARTA_ZARR_BENCH_TUNING
+#define CARTA_ZARR_BENCH_TUNING "unknown"
+#endif
 
 namespace carta::zarr::bench {
 
@@ -69,6 +72,7 @@ const std::vector<Column>& Columns() {
         {"host", [](const Row& r) { return r.host; }},
         {"bench_commit", [](const Row& r) { return r.bench_commit; }},
         {"build_type", [](const Row& r) { return r.build_type; }},
+        {"tuning", [](const Row& r) { return r.tuning; }},
         {"dataset", [](const Row& r) { return r.dataset; }},
         {"dataset_identity_hash", [](const Row& r) { return r.dataset_identity_hash; }},
         {"image_id", [](const Row& r) { return r.image_id; }},
@@ -217,6 +221,7 @@ Row RowTemplate(const RunOptions& options, Mode mode, ColdMethod cold, const Dat
     row.host = Host();
     row.bench_commit = CARTA_ZARR_BENCH_COMMIT;
     row.build_type = CARTA_ZARR_BENCH_BUILD_TYPE;
+    row.tuning = CARTA_ZARR_BENCH_TUNING;
     row.dataset = options.dataset;
     row.dataset_identity_hash = facts.identity_hash;
     row.image_id = options.image_id;
@@ -254,7 +259,7 @@ Row RowTemplate(const RunOptions& options, Mode mode, ColdMethod cold, const Dat
                               : facts.identity_hash;
     std::string key = std::to_string(kCsvVersion);
     for (const auto& part :
-         {identity, options.image_id, row.mode, std::to_string(row.processes), std::to_string(row.io_threads),
+         {identity, row.tuning, options.image_id, row.mode, std::to_string(row.processes), std::to_string(row.io_threads),
           std::to_string(row.decode_threads), row.cache_bytes, std::to_string(row.read_budget_bytes),
           std::to_string(row.seed), std::to_string(row.ops), row.region_fraction, row.histogram_method, row.animation_frames,
           std::to_string(row.trial_timeout_s), row.cold_method, row.label}) {

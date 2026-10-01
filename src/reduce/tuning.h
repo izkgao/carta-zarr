@@ -13,6 +13,15 @@
 // though they were part of the contract. They are not: nothing outside src/reduce/ has ever read
 // one. The limits a caller does have to respect -- kMaxHistogramBins and kMaxSpectralRegions --
 // stay in carta-zarr/reduce.h, because a request that exceeds either is rejected.
+//
+// Four of them were measured on one machine and depend on its caches and its thread count rather
+// than on what is being computed: how many pixels a task needs, and what the tasks' private
+// accumulators may cost together. Each of those can be replaced when the library is built, through
+// CARTA_ZARR_TUNING_OVERRIDES, so that carta-zarr-bench can measure another value on another
+// machine. That is all it is for: a build that overrides one is a measurement, not a configuration,
+// and none of them is a setting a deployment chooses. See ADR 0014. The others decide what a
+// reduction answers -- how finely a cube histogram resolves a bin, how much one block may hold --
+// and are not replaceable.
 
 #include "carta-zarr/reduce.h"
 
@@ -56,7 +65,18 @@ inline constexpr std::size_t kSpectralEmitBudgetBytes = 64u << 20;
 // rows of a plane, a cube histogram splits rows across the planes of a read, and a spectral
 // reduction splits chunk cells. PlanRowTasks multiplies out to pixels before it divides, so all
 // three are asking the same question of the same number.
-inline constexpr std::uint64_t kLeastPixelsPerTask = 1u << 16;
+//
+// It was 65,536, which split a 512 x 512 plane into four tasks however many cores there were. Measured
+// on the 512x512x7776 ASKAP cube, warm, one user: at 16,384 the backend's exact cube histogram, which
+// bins plane by plane, took 4.91 s against 5.50 s on a 28-core desktop and 5.15 s against 6.24 s on a
+// 32-thread two-socket server; at 262,144 it took 6.99 s and 10.52 s. With eight users at once every
+// value tried, 4,096 to 1,048,576, was within 6% on both, and regions within 3%. 4,096 gained a few
+// percent more on both, which is less than it risks for a small read on a slower dispatch. ADR 0014.
+#ifndef CARTA_ZARR_TUNING_LEAST_PIXELS_PER_TASK
+#define CARTA_ZARR_TUNING_LEAST_PIXELS_PER_TASK (1u << 14)
+#endif
+inline constexpr std::uint64_t kLeastPixelsPerTask = CARTA_ZARR_TUNING_LEAST_PIXELS_PER_TASK;
+static_assert(kLeastPixelsPerTask > 0, "CARTA_ZARR_TUNING_LEAST_PIXELS_PER_TASK must be positive");
 
 // What every task's private accumulator may cost together, one budget per reduction, each handed to
 // TaskSplit with what one accumulator costs. They are three numbers rather than one because they
@@ -65,13 +85,21 @@ inline constexpr std::uint64_t kLeastPixelsPerTask = 1u << 16;
 // A spectral reduction's partials are the region totals for one slab, allocated and zeroed once per
 // slab. The budget stops a reduction over thousands of regions from spending more on the split than
 // on the pixels.
-inline constexpr std::size_t kSpectralPartialBudgetBytes = 16u << 20;
+#ifndef CARTA_ZARR_TUNING_SPECTRAL_PARTIAL_BUDGET_BYTES
+#define CARTA_ZARR_TUNING_SPECTRAL_PARTIAL_BUDGET_BYTES (16u << 20)
+#endif
+inline constexpr std::size_t kSpectralPartialBudgetBytes = CARTA_ZARR_TUNING_SPECTRAL_PARTIAL_BUDGET_BYTES;
+static_assert(kSpectralPartialBudgetBytes > 0, "CARTA_ZARR_TUNING_SPECTRAL_PARTIAL_BUDGET_BYTES must be positive");
 
 // A plane histogram's partials are a copy of the bins per task. A caller may ask for as many as
 // kMaxHistogramBins, and a private copy of that for every worker is hundreds of megabytes for a pass
 // that is supposed to stream, so this is what keeps a large bin count from turning a split into an
 // allocation.
-inline constexpr std::size_t kHistogramPartialBudgetBytes = 64u << 20;
+#ifndef CARTA_ZARR_TUNING_HISTOGRAM_PARTIAL_BUDGET_BYTES
+#define CARTA_ZARR_TUNING_HISTOGRAM_PARTIAL_BUDGET_BYTES (64u << 20)
+#endif
+inline constexpr std::size_t kHistogramPartialBudgetBytes = CARTA_ZARR_TUNING_HISTOGRAM_PARTIAL_BUDGET_BYTES;
+static_assert(kHistogramPartialBudgetBytes > 0, "CARTA_ZARR_TUNING_HISTOGRAM_PARTIAL_BUDGET_BYTES must be positive");
 
 // A cube histogram's accumulators are a provisional histogram each, and what bounds them is cache
 // rather than memory: this is the cap ADR 0005 is about. A provisional histogram is eight bytes a
@@ -81,7 +109,11 @@ inline constexpr std::size_t kHistogramPartialBudgetBytes = 64u << 20;
 //
 // Measured on a 512x512x7776 ASKAP cube, warm, against 8.8 s for not splitting at all: four workers
 // 4.9 s, eight 8.7 s, twenty-eight 16.5 s. At the default resolution this comes out at four.
-inline constexpr std::size_t kCubeAccumulatorCacheBytes = 2u << 20;
+#ifndef CARTA_ZARR_TUNING_CUBE_ACCUMULATOR_CACHE_BYTES
+#define CARTA_ZARR_TUNING_CUBE_ACCUMULATOR_CACHE_BYTES (2u << 20)
+#endif
+inline constexpr std::size_t kCubeAccumulatorCacheBytes = CARTA_ZARR_TUNING_CUBE_ACCUMULATOR_CACHE_BYTES;
+static_assert(kCubeAccumulatorCacheBytes > 0, "CARTA_ZARR_TUNING_CUBE_ACCUMULATOR_CACHE_BYTES must be positive");
 
 }  // namespace carta::zarr::internal
 

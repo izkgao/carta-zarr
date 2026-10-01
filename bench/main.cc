@@ -164,6 +164,9 @@ int Run(const RunOptions& options) {
                      "deployed backend would see\n",
                      CARTA_ZARR_BENCH_BUILD_TYPE);
     }
+    if (std::string_view(CARTA_ZARR_BENCH_TUNING) != "default") {
+        std::fprintf(stderr, "note: the library is built with tuning overrides: %s\n", CARTA_ZARR_BENCH_TUNING);
+    }
     std::fprintf(stderr, "caches emptied by: %s\n", ColdMethodName(cold.method));
 
     std::string error;

@@ -36,7 +36,11 @@ target_link_libraries(carta_zarr_bench_core
     PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(carta_zarr_bench_core PUBLIC
     CARTA_ZARR_BENCH_COMMIT="${CARTA_ZARR_BENCH_COMMIT}"
-    CARTA_ZARR_BENCH_BUILD_TYPE="$<IF:$<STREQUAL:$<CONFIG>,>,none,$<CONFIG>>")
+    CARTA_ZARR_BENCH_BUILD_TYPE="$<IF:$<STREQUAL:$<CONFIG>,>,none,$<CONFIG>>"
+    # The library's tuning overrides, which the bench cannot ask the library for: they are internal,
+    # and the bench reads it through the public interface alone. Right as long as the bench runs
+    # against the library it was built with, which its RPATH sees to once installed.
+    CARTA_ZARR_BENCH_TUNING="${CARTA_ZARR_TUNING}")
 
 add_executable(carta_zarr_bench main.cc)
 target_link_libraries(carta_zarr_bench PRIVATE carta_zarr_bench_core nlohmann_json::nlohmann_json)
