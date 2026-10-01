@@ -115,7 +115,10 @@ open = 1.0
 # four on the sky -- so that it fits every chunk of the grid. On Lustre, a shard is one file where its
 # chunks would be many: fewer files for the metadata server, which every client shares, and a size
 # that can be a whole number of stripes.
-chunk = ["l=512,m=512,frequency=16", "l=256,m=256,frequency=64", "l=128,m=128,frequency=256"]
+# Put the chunk shapes already in use here too -- 4 MiB of float32 such as 512 x 512 x 4 or
+# 256 x 256 x 16 -- so that the report compares every candidate with them.
+chunk = ["l=512,m=512,frequency=4", "l=256,m=256,frequency=16", "l=512,m=512,frequency=16",
+         "l=256,m=256,frequency=64", "l=128,m=128,frequency=256"]
 shard = ["", "frequency*16"]
 codec = ["zstd:3", "blosc:zstd:5:shuffle"]
 consolidated = [true]

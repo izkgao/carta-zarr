@@ -83,6 +83,13 @@ which gives about 180 for the 512-square cube (128 measured best) and 30 to 45 f
 sweep measures, not an answer: regions, animations and cube histograms pull in other directions, and
 it was fitted to two cubes.
 
+These sweeps tried chunks of 8 to 16 MiB of float32. Chunks of 4 MiB, a million pixels -- 512 x 512 x 4
+or 256 x 256 x 16, which CARTA's own tests have mostly used -- were not among them. By the rule, a
+million-pixel chunk suits a 2048-square, 2048-channel cube at about 22 channels deep, close to
+256 x 256 x 16, and a 512-square, 4096-channel one at about 126, far deeper than 512 x 512 x 4. Put the
+chunk shapes a site already uses into its sweep's grid, so that the report compares every candidate
+against them.
+
 ### Use more file-reading threads on Lustre
 
 `--zarr_file_io_threads 8` was better than the default of 2 on Lustre in every sweep: a plane of the
