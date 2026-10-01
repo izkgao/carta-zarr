@@ -735,17 +735,23 @@ class Sweep:
         return command
 
     def warm_up(self, path: Path, layout: Layout, runs: list[Run]) -> None:
-        """Reads what the warm runs will, once and untimed, so that they find it in the page cache. Into
-        a CSV of its own under logs/, which no report reads, and again every time the dataset is
-        written again."""
-        warm = [run for run in runs if run.cold == "off"]
-        if not warm:
+        """One untimed run of every mode the runs will measure, each time a dataset is written, into a
+        CSV of its own under logs/ that no report reads.
+
+        On almat3's Lustre the first run after a dataset was written read a region a third to half
+        again slower than every run after it, with the same caches emptied before each. Opening every
+        file first did not change that, nor reading a byte of each, nor reading all of them, nor
+        waiting two minutes: only a run of the bench did. Without it the first run on each layout --
+        stage 1 with one user -- would be slower than the rest for a reason that is not the layout.
+        It also leaves the dataset in the page cache for the warm stage, which empties nothing."""
+        if not runs:
             return
-        modes = tuple(dict.fromkeys(mode for run in warm for mode in run.modes))
-        run = Run("warm-up", warm[0].setting, max(run.users for run in warm), modes, 1, cold="off")
+        modes = tuple(dict.fromkeys(mode for run in runs for mode in run.modes))
+        cold = "off" if all(run.cold == "off" for run in runs) else ""
+        run = Run("warm-up", runs[0].setting, 1, modes, 1, cold=cold)
         log(f"  warming {layout.name} up")
         csv_path = self.logs / f"warm-up-{layout.name}-{int(time.time())}.csv"
-        with open(self.logs / f"warm-{layout.name}.log", "a") as stderr:
+        with open(self.logs / f"warm-up-{layout.name}.log", "a") as stderr:
             subprocess.run(self.bench_command(path, run, csv_path), stdout=subprocess.DEVNULL, stderr=stderr)
 
     def bench_run(self, path: Path, layout: Layout, run: Run, validate: bool) -> None:

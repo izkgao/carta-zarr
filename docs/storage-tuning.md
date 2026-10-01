@@ -131,9 +131,17 @@ tools exist so that it can be measured rather than assumed.
 ### Empty the right caches
 
 A read that finds its data in memory measures memory. Between a CARTA server and the disks there are
-three caches: carta-zarr's own (each read in the bench starts without it), the client's page cache,
-and the storage servers'. On almat3's Lustre a whole-cube read took 1.24 s with everything cached,
-2.0 s with the client's page cache emptied, and 5.5 s with the servers' emptied too.
+at least three caches: carta-zarr's own (each read in the bench starts without it), the client's page
+cache, and the storage servers'. On almat3's Lustre a whole-cube read took 1.24 s with everything
+cached, 2.0 s with the client's page cache emptied, and 5.5 s with the servers' emptied too -- but
+11.9 s the first time after the cube was written. Something below what an ordinary user can empty
+keeps data that was read recently, and no later read was as slow as the first.
+
+The sweep therefore runs the bench once, untimed, every time it writes a dataset, before measuring
+it. Every layout is then measured in the same state, which is what a comparison needs, and its times
+are those of data read recently rather than data never read: on almat3 a third to half faster for a
+region of the cube's own layout. A first view of a cube nobody has opened in a while will be slower
+than the report says.
 
 - With root, `drop_caches` empties the client's page cache; give the sweep a `drop_cache_cmd` that
   empties the servers' too if the storage administrators provide one.
@@ -150,10 +158,13 @@ and the storage servers'. On almat3's Lustre a whole-cube read took 1.24 s with 
   1,024 channels holds only eight chunks 128 deep, and sixteen users each reading sixteen planes
   share them, so most reads find their chunks already in the page cache. The report counts the reads
   that did not, ranks on those, and warns when there are too few, with what to change.
-- **The order of runs on Lustre.** Emptying the data caches leaves the client's metadata -- its locks
-  and directory entries -- warm, and no ordinary user can empty those. A second run of the same data
-  is a little faster than the first whatever changed between them. A comparison of two builds once
-  showed a 50% to 70% gain that vanished when the order was alternated.
+- **The order of runs on Lustre.** With the caches emptied the same way before each, the first run
+  on a dataset after it was written, or after other datasets were read, was slower than the ones that
+  followed it: a region of a cube in one-channel chunks took 1.2 s to 1.7 s the first time and 0.8 s
+  every time after. Opening every file first, reading a byte of each, reading all of them, or waiting
+  two minutes did not change it; only a run of the bench did. A comparison of two builds once showed
+  a 50% to 70% gain that vanished when the order was alternated. The sweep's untimed run puts every
+  measured run after one; compare builds or settings by hand the same way.
 - **One user is not eight.** Settings that help one user can do nothing for eight, whose processes
   already keep every core busy; the report gives the target number of users, and how the choice does
   with one and with the typical number.
