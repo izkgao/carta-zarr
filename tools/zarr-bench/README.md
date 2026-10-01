@@ -146,6 +146,19 @@ the data as it is, and for once it is in the recommended layout, and every warni
 failed, cold reads that were cold on this host only, a mode the recommendation gives up, results
 that did not survive validation. The tables behind it follow.
 
+- **Cube shapes.** The best layout depends on the size of the plane: on a 512 x 512 cube chunks 128
+  channels deep served spectra best at little cost to planes, and on a 2048 x 2048 one the same
+  chunks made a plane take seconds. `[[source.shape]]` sweeps each shape a site holds on its own,
+  and the summary in the output directory compares them and says what one layout and one setting --
+  the backend reads every cube with the same flags -- would serve them all. A shape too large to
+  rewrite at its full depth for every layout, as an SKA or ngVLA plane tens of thousands of pixels
+  square would be, is measured on fewer channels with `channels` saying how many it stands for: its
+  planes are measured at full size, and the modes that cover every channel are scaled to the full
+  depth, as an estimate. A layout whose chunk is larger than a shape's cube is skipped for that
+  shape, since it would not be the chunk a full cube has.
+- **Shards** can be said relative to each chunk, `frequency*8` or `l*4,m*4`, so that one list fits
+  every chunk of the grid. On Lustre a shard turns many chunk files into one, which spares the
+  metadata server.
 - **Choosing across modes.** Each mode is ranked on its own, by the median operation -- for `plane`,
   `spectrum` and `region` the median first touch, and for `animation` the median frame. Where one
   choice has to serve them all -- the layouts stage 2 tries, the settings recommended -- each mode's
