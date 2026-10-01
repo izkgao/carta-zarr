@@ -64,6 +64,23 @@ On the 512-square plane eight users' spectra and regions could not all read chun
 there are too few chunks across it -- so those columns include some reads the page cache answered,
 which if anything flatters the layouts with large chunks across the sky.
 
+A real 7763 x 4742 x 128 ASKAP cube on the same Lustre, in the 512 x 512 x 4 chunks it was written in
+and in others:
+
+| chunk (l x m x channels) | size | plane | spectrum | region | score |
+|---|---|---|---|---|---|
+| 1024 x 1024 x 4 | 16 MiB | 578 ms | 451 ms | 2.50 s | 1.83 |
+| 512 x 512 x 16 | 16 MiB | 1.47 s | 119 ms | 1.97 s | 1.89 |
+| 512 x 512 x 4 (the cube's own) | 4 MiB | 1.00 s | 232 ms | 2.91 s | 1.94 |
+| 256 x 256 x 16 | 4 MiB | 2.39 s | 67 ms | 2.69 s | 2.03 |
+| 1024 x 1024 x 1 | 4 MiB | 279 ms | 792 ms | 3.84 s | 2.03 |
+| 256 x 256 x 64 | 16 MiB | 4.56 s | 40 ms | 1.62 s | 2.62 |
+
+The score is the weighted geometric mean of each mode's slowdown against its best layout, lower being
+better, over every mode the sweep measures. The best layout was only 4% better overall than the
+cube's own, and doubling the weight of spectra or of planes moved first place to a different layout
+each way: for a plane this size, 4 MiB chunks four channels deep are about as good as any.
+
 With every mode weighted alike, 128 x 128 x 128 served the 512-square cube best, and 512 x 512 x 16
 the 2048-square one, where the same 128-deep chunks made a plane take nearly three seconds. A chunk
 one plane deep -- what a cube converted plane by plane gets -- gives the fastest channel changes and
@@ -83,19 +100,21 @@ which gives about 180 for the 512-square cube (128 measured best) and 30 to 45 f
 sweep measures, not an answer: regions, animations and cube histograms pull in other directions, and
 it was fitted to two cubes.
 
-These sweeps tried chunks of 8 to 16 MiB of float32. Chunks of 4 MiB, a million pixels -- 512 x 512 x 4
-or 256 x 256 x 16, which CARTA's own tests have mostly used -- were not among them. By the rule, a
-million-pixel chunk suits a 2048-square, 2048-channel cube at about 22 channels deep, close to
-256 x 256 x 16, and a 512-square, 4096-channel one at about 126, far deeper than 512 x 512 x 4. Put the
-chunk shapes a site already uses into its sweep's grid, so that the report compares every candidate
-against them.
+For the 7763 x 4742 x 128 cube the rule gives about 4 for chunks of 4 million pixels and about 2 for
+chunks of a million; 1024 x 1024 x 4 measured best, and the million-pixel chunks one and four deep
+came close behind. By the rule a million-pixel chunk -- 4 MiB, the size CARTA's own tests have mostly
+used, as 512 x 512 x 4 or 256 x 256 x 16 -- suits a 2048-square, 2048-channel cube at about 22 channels
+deep, close to 256 x 256 x 16, and a 512-square, 4096-channel one at about 126, far deeper than
+512 x 512 x 4. Put the chunk shapes a site already uses into its sweep's grid, so that the report
+compares every candidate against them.
 
 ### Use more file-reading threads on Lustre
 
 `--zarr_file_io_threads 8` was better than the default of 2 on Lustre in every sweep: a plane of the
 128-deep layout went from 146 ms to 104 ms and a spectrum from 222 ms to 157 ms; a region of the
 cube's own layout from 6.35 s to 3.33 s; a plane of the 2048-square cube's 512 x 512 x 16 layout from
-478 ms to 358 ms. On BeeGFS the difference was within the noise.
+478 ms to 358 ms; and in the 7763 x 4742 cube's own 512 x 512 x 4 chunks a plane from 995 ms to
+838 ms and a spectrum from 240 ms to 167 ms. On BeeGFS the difference was within the noise.
 `--zarr_data_copy_threads` at half the logical cores was as good as all of them.
 
 ### Striping and shards
@@ -131,9 +150,17 @@ tools exist so that it can be measured rather than assumed.
 ### Empty the right caches
 
 A read that finds its data in memory measures memory. Between a CARTA server and the disks there are
-three caches: carta-zarr's own (each read in the bench starts without it), the client's page cache,
-and the storage servers'. On almat3's Lustre a whole-cube read took 1.24 s with everything cached,
-2.0 s with the client's page cache emptied, and 5.5 s with the servers' emptied too.
+at least three caches: carta-zarr's own (each read in the bench starts without it), the client's page
+cache, and the storage servers'. On almat3's Lustre a whole-cube read took 1.24 s with everything
+cached, 2.0 s with the client's page cache emptied, and 5.5 s with the servers' emptied too -- but
+11.9 s the first time after the cube was written. Something below what an ordinary user can empty
+keeps data that was read recently, and no later read was as slow as the first.
+
+The sweep therefore runs the bench once, untimed, every time it writes a dataset, before measuring
+it. Every layout is then measured in the same state, which is what a comparison needs, and its times
+are those of data read recently rather than data never read: on almat3 a third to half faster for a
+region of the cube's own layout. A first view of a cube nobody has opened in a while will be slower
+than the report says.
 
 - With root, `drop_caches` empties the client's page cache; give the sweep a `drop_cache_cmd` that
   empties the servers' too if the storage administrators provide one.
@@ -150,10 +177,13 @@ and the storage servers'. On almat3's Lustre a whole-cube read took 1.24 s with 
   1,024 channels holds only eight chunks 128 deep, and sixteen users each reading sixteen planes
   share them, so most reads find their chunks already in the page cache. The report counts the reads
   that did not, ranks on those, and warns when there are too few, with what to change.
-- **The order of runs on Lustre.** Emptying the data caches leaves the client's metadata -- its locks
-  and directory entries -- warm, and no ordinary user can empty those. A second run of the same data
-  is a little faster than the first whatever changed between them. A comparison of two builds once
-  showed a 50% to 70% gain that vanished when the order was alternated.
+- **The order of runs on Lustre.** With the caches emptied the same way before each, the first run
+  on a dataset after it was written, or after other datasets were read, was slower than the ones that
+  followed it: a region of a cube in one-channel chunks took 1.2 s to 1.7 s the first time and 0.8 s
+  every time after. Opening every file first, reading a byte of each, reading all of them, or waiting
+  two minutes did not change it; only a run of the bench did. A comparison of two builds once showed
+  a 50% to 70% gain that vanished when the order was alternated. The sweep's untimed run puts every
+  measured run after one; compare builds or settings by hand the same way.
 - **One user is not eight.** Settings that help one user can do nothing for eight, whose processes
   already keep every core busy; the report gives the target number of users, and how the choice does
   with one and with the typical number.
