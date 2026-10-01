@@ -301,11 +301,13 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         LIBRARIES nlohmann_json::nlohmann_json)
 
     # What a pool of its own is made of: its size, whose threads it runs on, and whether anything keeps
-    # it. Compiled on its own because a consumer reading through one cannot see any of the three --
-    # the pixels are the same whatever the pool.
+    # it, and whether a cached chunk is checked against storage before it is used. Compiled on its own
+    # because a consumer reading through one cannot see any of these -- the pixels are the same
+    # whatever the pool, and whether or not the cache asked.
     carta_zarr_add_test(carta_zarr_store_context_tests INTERNAL
         TEST_NAME carta-zarr-store-context
         SOURCES tests/store_context_test.cc src/zarr/store_context.cc
+        DEFINITIONS ${CARTA_ZARR_WIDE_FIXTURE}
         LIBRARIES
             nlohmann_json::nlohmann_json
             tensorstore::tensorstore

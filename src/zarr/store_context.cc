@@ -26,6 +26,10 @@ Result<tensorstore::TensorStore<>> OpenZarr3File(const std::string& path, const 
     auto spec = tensorstore::Spec::FromJson({
         {"driver", "zarr3"},
         {"kvstore", {{"driver", "file"}, {"path", path}}},
+        // A chunk cached after the array was opened is used without asking storage whether it has
+        // changed. TensorStore's default asks on every read, which on a parallel file system is a
+        // metadata round trip per chunk even when the cache holds it. ADR 0015.
+        {"recheck_cached_data", "open"},
     });
     if (!spec.ok()) {
         return Error{ErrorCode::io_error, "Failed to create TensorStore spec: " + spec.status().ToString(),
