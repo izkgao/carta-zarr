@@ -28,6 +28,10 @@ Driven by a TOML file (see example-sweep.toml), in four stages that each write i
 summary.md says what to set and why. Every stage resumes: a run already in sweep-state.json is not
 repeated, and a bench interrupted part-way resumes from the CSV.
 
+With [[source.shape]] tables, each shape -- a crop of the source, or a synthetic shape -- is a sweep of
+its own in a directory of its own, since the best chunk depth depends on the size of the plane, and
+the top-level summary.md compares them and says what one layout and one setting would serve them all.
+
   sweep.py CONFIG.toml [--output DIR] [--set KEY=VALUE ...] [--dry-run] [--report-only]
 """
 
@@ -85,7 +89,7 @@ BACKEND_DEFAULTS = {"io_threads": 2, "decode_threads": "cores", "cache_mib": 102
 DEFAULTS: dict[str, Any] = {
     "paths": {"bench": "", "work": "", "generator": str(HERE / "generate.py"), "keep_datasets": False},
     "source": {"path": "", "image": "", "crop": "", "validate_crop": "",
-               "synthetic": "", "validate_synthetic": "", "seed": 1},
+               "synthetic": "", "validate_synthetic": "", "seed": 1, "shape": []},
     "users": {"target": 1, "typical": 0},
     "measure": {"modes": list(MODES), "trials": 5, "trial_timeout": 600, "seed": 1, "cold": "auto",
                 "drop_cache_cmd": "", "ops": {}, "region_fraction": 0.05, "animation_frames": 32,
@@ -153,7 +157,9 @@ def load_config(path: Path, assignments: list[str]) -> dict[str, Any]:
     if not config["paths"]["bench"] or not config["paths"]["work"]:
         raise SystemExit("paths.bench and paths.work are required")
     source = config["source"]
-    if bool(source["path"]) == bool(source["synthetic"]):
+    if source["shape"]:
+        check_shapes(source)
+    elif bool(source["path"]) == bool(source["synthetic"]):
         raise SystemExit("source needs exactly one of path (a cube to rewrite) and synthetic (a shape)")
     for mode in config["measure"]["modes"]:
         if mode not in MODES:
@@ -180,6 +186,41 @@ def load_config(path: Path, assignments: list[str]) -> dict[str, Any]:
     return config
 
 
+SHAPE_KEYS = {"name", "crop", "synthetic", "validate_crop", "validate_synthetic", "channels", "weight"}
+
+
+def check_shapes(source: dict[str, Any]) -> None:
+    """[[source.shape]]: each named, each a crop of source.path or, without one, a synthetic shape."""
+    if source["synthetic"] or source["crop"] or source["validate_crop"] or source["validate_synthetic"]:
+        raise SystemExit("with [[source.shape]], crop and synthetic go in each shape, not in [source]")
+    names = set()
+    for shape in source["shape"]:
+        if not isinstance(shape, dict) or not set(shape) <= SHAPE_KEYS or "name" not in shape:
+            raise SystemExit(f"[[source.shape]]: each is a table of name and {', '.join(sorted(SHAPE_KEYS - {'name'}))}")
+        name = shape["name"]
+        if name in names or not re.fullmatch(r"[\w.-]+", str(name)):
+            raise SystemExit(f"[[source.shape]]: {name!r} is not a name of its own (letters, digits, ._-)")
+        names.add(name)
+        if source["path"] and ("synthetic" in shape or "validate_synthetic" in shape):
+            raise SystemExit(f"[[source.shape]] {name}: a crop of source.path takes crop, not synthetic")
+        if not source["path"] and not shape.get("synthetic"):
+            raise SystemExit(f"[[source.shape]] {name}: without source.path, each shape needs synthetic")
+        if "channels" in shape and (not isinstance(shape["channels"], int) or shape["channels"] < 1):
+            raise SystemExit(f"[[source.shape]] {name}: channels is the cube's full depth, a positive whole number")
+        if "weight" in shape and (not isinstance(shape["weight"], (int, float)) or shape["weight"] < 0):
+            raise SystemExit(f"[[source.shape]] {name}: weight is a number of at least zero")
+
+
+def shape_config(config: dict[str, Any], shape: dict[str, Any]) -> dict[str, Any]:
+    """The configuration of one shape's sweep: the source cropped or synthesized as the shape says."""
+    result = json.loads(json.dumps(config))
+    source = result["source"]
+    for key in ("crop", "synthetic", "validate_crop", "validate_synthetic"):
+        source[key] = shape.get(key, "")
+    source["shape"] = []
+    return result
+
+
 def toml_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -200,8 +241,15 @@ def dump_config(config: dict[str, Any]) -> str:
     for section, table in config.items():
         lines.append(f"[{section}]")
         for key, value in table.items():
+            if key == "shape" and isinstance(value, list):
+                continue
             lines.append(f"{key} = {toml_value(value)}")
         lines.append("")
+        if section == "source":
+            for shape in table.get("shape", []):
+                lines.append("[[source.shape]]")
+                lines += [f"{key} = {toml_value(value)}" for key, value in shape.items()]
+                lines.append("")
     return "\n".join(lines)
 
 
@@ -268,8 +316,28 @@ CODEC = re.compile(r"^(none|zstd(:\d+)?|gzip(:\d+)?|blosc(:\w+(:\d+(:(noshuffle|
 STRIPE = re.compile(r"^(lustre|beegfs):count=\d+,size=\d+[kKmMgG]?(i?B)?$")
 
 
-def invalid_reason(layout: Layout) -> str | None:
-    """Why the generator would refuse this layout, found before anything is written."""
+def resolve_shard(chunk_text: str, shard_text: str) -> str:
+    """A shard shape with every entry absolute: "frequency*8" is eight of the chunk's own along the
+    spectral axis, and "frequency=256" is 256 whatever the chunk. "" when it comes to the chunk
+    itself, which is no shard. Raises ValueError for an entry that is neither."""
+    chunk = axis_map(chunk_text)
+    shard: dict[str, int] = {}
+    for item in filter(None, (part.strip() for part in shard_text.split(","))):
+        name, times, factor = item.partition("*")
+        if times:
+            if name not in AXES or not factor.isdigit() or int(factor) <= 0:
+                raise ValueError(f"{item!r} is not axis*positive-integer over {', '.join(AXES)}")
+            shard[name] = chunk.get(name, 1) * int(factor)
+        else:
+            shard.update(axis_map(item))
+    if all(length == chunk.get(name, 1) for name, length in shard.items()):
+        return ""
+    return ",".join(f"{name}={shard[name]}" for name in AXES if name in shard)
+
+
+def invalid_reason(layout: Layout, lengths: dict[str, int] | None = None) -> str | None:
+    """Why the generator would refuse this layout, or why it would misrepresent a cube of `lengths`
+    (its axes' lengths, when they are known), found before anything is written."""
     if layout.current:
         return None
     try:
@@ -279,6 +347,11 @@ def invalid_reason(layout: Layout) -> str | None:
         return str(error)
     if not chunk:
         return "no chunk shape"
+    for name, length in chunk.items():
+        # A chunk the cube cannot fill is not the chunk a cube of the full size would have: a
+        # spectrum would read one part-empty chunk where the real one reads several full ones.
+        if lengths and name in lengths and length > lengths[name]:
+            return f"chunk {name}={length} is larger than the cube's {lengths[name]}"
     for name, length in shard.items():
         inner = chunk.get(name, 1)
         if length % inner:
@@ -297,27 +370,37 @@ def stage1_layouts(config: dict[str, Any]) -> tuple[list[Layout], list[tuple[Lay
     if config["source"]["path"]:
         candidates.append(Layout("current", current=True))
     index = 0
+    refused: dict[str, str] = {}
+
+    def resolved(name: str, chunk: str, shard: str, *rest: Any) -> Layout:
+        try:
+            shard = resolve_shard(chunk, shard)
+        except ValueError as error:
+            refused[name] = str(error)
+        return Layout(name, chunk, shard, *rest)
+
     for chunk in stage["chunk"]:
         for shard in stage["shard"]:
             for codec in stage["codec"]:
                 for consolidated in stage["consolidated"]:
                     for stripe in stage["stripe"]:
                         index += 1
-                        candidates.append(Layout(f"L{index:02d}", chunk, shard, codec, consolidated, stripe))
+                        candidates.append(resolved(f"L{index:02d}", chunk, shard, codec, consolidated, stripe))
     for entry in stage["layout"]:
         index += 1
         unknown = set(entry) - {"name", "chunk", "shard", "codec", "consolidated", "stripe"}
         if unknown:
             raise SystemExit(f"[[stage1.layout]] has unknown keys {sorted(unknown)}")
-        candidates.append(Layout(entry.get("name", f"L{index:02d}"), entry.get("chunk", ""), entry.get("shard", ""),
-                                 entry.get("codec", "zstd:3"), entry.get("consolidated", True),
-                                 entry.get("stripe", "")))
+        candidates.append(resolved(entry.get("name", f"L{index:02d}"), entry.get("chunk", ""), entry.get("shard", ""),
+                                   entry.get("codec", "zstd:3"), entry.get("consolidated", True),
+                                   entry.get("stripe", "")))
+    lengths = cube_lengths(config, False)
     valid, invalid, seen = [], [], set()
     for layout in candidates:
         if layout.key in seen:
             continue
         seen.add(layout.key)
-        reason = invalid_reason(layout)
+        reason = refused.get(layout.name) or invalid_reason(layout, lengths)
         if reason:
             invalid.append((layout, reason))
         else:
@@ -468,25 +551,41 @@ def default_image(root: dict[str, Any]) -> str:
     return base.get("sky", "SKY") if isinstance(base, dict) else "SKY"
 
 
-def uncompressed_bytes(config: dict[str, Any], validate: bool) -> int:
-    """What one dataset of this sweep holds before compression: its size on disk at worst."""
+def cube_lengths(config: dict[str, Any], validate: bool) -> dict[str, int]:
+    """The length of each axis of the cube a dataset of this sweep holds, by XRADIO's axis name. Empty
+    when the source cannot be read, as in a configuration checked before its source exists."""
     source = config["source"]
     if source["synthetic"]:
-        shape_text = source["validate_synthetic"] if validate else source["synthetic"]
-        return math.prod(axis_map(shape_text).values()) * 4
+        return axis_map(source["validate_synthetic"] if validate else source["synthetic"])
     root = Path(source["path"])
-    metadata = json.loads((root / (source["image"] or default_image(json.loads((root / "zarr.json").read_text())))
-                           / "zarr.json").read_text())
-    dims = metadata.get("dimension_names") or []
-    shape = list(metadata["shape"])
+    try:
+        image = source["image"] or default_image(json.loads((root / "zarr.json").read_text()))
+        metadata = json.loads((root / image / "zarr.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    lengths = dict(zip(metadata.get("dimension_names") or [], metadata["shape"]))
     crop = source["validate_crop"] if validate else source["crop"]
     for item in filter(None, crop.split(",")):
         name, _, window = item.partition("=")
         start, _, stop = window.partition(":")
-        if name in dims:
-            shape[dims.index(name)] = int(stop) - int(start)
-    itemsize = {"float32": 4, "float64": 8, "int16": 2, "int32": 4, "uint8": 1}.get(metadata["data_type"], 4)
-    return math.prod(shape) * itemsize
+        if name in lengths:
+            lengths[name] = int(stop) - int(start)
+    return lengths
+
+
+def item_size(config: dict[str, Any]) -> int:
+    source = config["source"]
+    if source["synthetic"]:
+        return 4
+    root = Path(source["path"])
+    image = source["image"] or default_image(json.loads((root / "zarr.json").read_text()))
+    data_type = json.loads((root / image / "zarr.json").read_text())["data_type"]
+    return {"float32": 4, "float64": 8, "int16": 2, "int32": 4, "uint8": 1}.get(data_type, 4)
+
+
+def uncompressed_bytes(config: dict[str, Any], validate: bool) -> int:
+    """What one dataset of this sweep holds before compression: its size on disk at worst."""
+    return math.prod(cube_lengths(config, validate).values()) * item_size(config)
 
 
 def has_validation(config: dict[str, Any]) -> bool:
@@ -1629,6 +1728,139 @@ def tradeoff_section(analysis: Analysis, ranking: list[tuple[Layout, float, floa
     return lines
 
 
+# -- Across shapes ---------------------------------------------------------------------------------
+
+# The modes whose operations cover every channel, and so take longer the deeper the cube.
+DEPTH_MODES = ("spectrum", "region", "cube-histogram")
+
+
+def weighted_geomean(values: list[tuple[float, float]]) -> float:
+    """The geometric mean of (value, weight) pairs; infinite when any weighted value is."""
+    total = weights = 0.0
+    for value, weight in values:
+        if weight <= 0:
+            continue
+        if not math.isfinite(value) or value <= 0:
+            return math.inf
+        total += weight * math.log(value)
+        weights += weight
+    return math.exp(total / weights) if weights else math.inf
+
+
+def write_site_report(config: dict[str, Any], output: Path) -> None:
+    """The top-level summary.md of a sweep over several shapes: each shape's own answer, and the one
+    layout and the one setting that would serve them all, since a server reads every cube it holds
+    with the same flags and an archive is seldom rewritten per cube size."""
+    shapes = config["source"]["shape"]
+    entries = []
+    for shape in shapes:
+        sub_config = shape_config(config, shape)
+        directory = output / shape["name"]
+        if not (directory / "sweep-state.json").is_file():
+            continue
+        layouts, _ = stage1_layouts(sub_config)
+        sweep = Sweep(sub_config, directory)
+        analysis = Analysis(sweep, layouts)
+        entries.append((shape, sub_config, sweep, analysis, analysis.recommendations()[1]))
+    target = config["users"]["target"]
+    lines = [f"# Storage tuning across cube shapes: {platform.node()}", "",
+             f"Generated {datetime.datetime.now().isoformat(timespec='seconds')} by tools/zarr-bench/sweep.py. "
+             "Each shape is a sweep of its own, reported in full in its directory; this compares them.", ""]
+
+    # -- Each shape's own answer
+    rows = []
+    for shape, sub_config, sweep, analysis, after in entries:
+        lengths = cube_lengths(sub_config, False)
+        size = f"{lengths.get('l', '?')}×{lengths.get('m', '?')}×{lengths.get('frequency', '?')}"
+        if shape.get("channels"):
+            size += f" (of {shape['channels']})"
+        warnings = (sweep.output / "summary.md").read_text().split("## Machine")[0].count("\n- **") \
+            if (sweep.output / "summary.md").is_file() else 0
+        rows.append([f"[{shape['name']}]({shape['name']}/summary.md)", size,
+                     f"{after.layout.name} ({after.layout.describe()})" if after else "–",
+                     after.setting.describe() if after else "–", str(warnings)])
+    lines += ["## Each shape", "",
+              "The layout and settings each shape's own sweep recommends, with the number of warnings its report "
+              "opens with.", ""]
+    lines += table(["shape", "l×m×channels", "layout", "settings", "warnings"], rows)
+
+    # -- One layout for every shape
+    names = None
+    for _, _, _, analysis, _ in entries:
+        measured = {layout.name for layout in analysis.layouts if analysis.done(layout) and not layout.current}
+        names = measured if names is None else names & measured
+    site_layouts = []
+    for name in sorted(names or []):
+        scores = []
+        for shape, _, _, analysis, _ in entries:
+            ranked = {layout.name: value for layout, value, _ in analysis.stage1_ranking(target)}
+            scores.append((ranked.get(name, math.inf), float(shape.get("weight", 1.0))))
+        layout = next(layout for layout in entries[0][3].layouts if layout.name == name)
+        site_layouts.append((weighted_geomean(scores), layout, scores))
+    site_layouts.sort(key=lambda entry: (entry[0], entry[1].name))
+    lines += ["## One layout for every shape", "",
+              "Each layout's stage 1 score in every shape -- its weighted slowdown against that shape's best layout, "
+              f"with {plural(target, 'user')} -- and their geometric mean, weighted by each shape's weight. Only layouts "
+              "every "
+              "shape measured are compared.", ""]
+    if site_layouts and math.isfinite(site_layouts[0][0]):
+        best = site_layouts[0][1]
+        lines += [f"**One layout for every shape:** {best.name} ({best.describe()}), "
+                  f"{site_layouts[0][0]:.2f}× its shapes' own best on average.", ""]
+    lines += table(["layout", "describe"] + [shape["name"] for shape, *_ in entries] + ["all shapes"],
+                   [[layout.name, layout.describe()] + [ratio_text(value) for value, _ in scores] + [ratio_text(value)]
+                    for value, layout, scores in site_layouts])
+
+    # -- One setting for every shape
+    grid = [setting for setting in reader_grid(config, os.cpu_count() or 1) if setting.read_budget == 0]
+    site_settings = []
+    for setting in grid:
+        scores = []
+        for shape, _, _, analysis, after in entries:
+            if not after:
+                scores.append((math.inf, float(shape.get("weight", 1.0))))
+                continue
+            ranked = {choice.setting: choice.score for choice in analysis.ranked_settings(after.layout)}
+            scores.append((ranked.get(setting, math.inf), float(shape.get("weight", 1.0))))
+        site_settings.append((weighted_geomean(scores), setting, scores))
+    site_settings.sort(key=lambda entry: entry[0])
+    lines += ["## One setting for every shape", "",
+              "carta-backend reads every cube with the same flags. Each setting's stage 2 score on each shape's "
+              "recommended layout, against the best setting there, and their weighted geometric mean.", ""]
+    if site_settings and math.isfinite(site_settings[0][0]):
+        best = site_settings[0][1]
+        lines += [f"**One setting for every shape:** {best.describe()}", "", "```", best.backend_flags(), "```", "",
+                  f"or in settings.json: `{best.settings_json()}`", ""]
+    lines += table(["settings"] + [shape["name"] for shape, *_ in entries] + ["all shapes"],
+                   [[setting.describe()] + [ratio_text(value) for value, _ in scores] + [ratio_text(value)]
+                    for value, setting, scores in site_settings])
+
+    # -- Full depth, for shapes measured on fewer channels than they stand for
+    deep = []
+    for shape, sub_config, sweep, analysis, _ in entries:
+        measured = cube_lengths(sub_config, False).get("frequency", 0)
+        full = shape.get("channels", 0)
+        if not measured or full <= measured:
+            continue
+        factor = full / measured
+        for layout, _, _ in analysis.stage1_ranking(target):
+            cells = [shape["name"], layout.name]
+            for mode in DEPTH_MODES:
+                stats = analysis.results.get("stage1", dataset_key(layout, False), sweep.baseline, target, mode)
+                cells.append(f"≈ {seconds_text(stats.median * factor)}" if stats else "–")
+            deep.append(cells)
+    if deep:
+        lines += ["## At full depth", "",
+                  "Shapes measured on fewer channels than the cubes they stand for, to keep each layout's copy small "
+                  "enough to write: the modes that cover every channel, scaled by the channels they stand for over the "
+                  "channels measured. An estimate, which assumes those modes take time in proportion to the channels "
+                  "they cover; planes and animations are measured at their full size and need none.", ""]
+        lines += table(["shape", "layout"] + list(DEPTH_MODES), deep)
+
+    lines += ["## Configuration", "", "```toml", dump_config(config).rstrip(), "```", ""]
+    (output / "summary.md").write_text("\n".join(lines))
+
+
 # -- Main -----------------------------------------------------------------------------------------
 
 
@@ -1644,15 +1876,12 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_arguments(argv)
-    config = load_config(args.config, args.set)
-    output = (args.output or args.config.parent / "zarr-bench-results").resolve()
+def sweep_one(config: dict[str, Any], output: Path, args: argparse.Namespace) -> int | None:
+    """One sweep, as far as the arguments say: a dry run, a report from what there is, or the whole
+    of it. Returns the exit status, or None when it did not get as far as a report."""
     layouts, invalid = stage1_layouts(config)
-
     if args.dry_run:
         return dry_run(config, output)
-
     if not args.report_only:
         problems = preflight(config)
         if problems:
@@ -1663,7 +1892,8 @@ def main(argv: list[str] | None = None) -> int:
     sweep = Sweep(config, output)
     if args.report_only:
         if not sweep.csv.is_file():
-            raise SystemExit(f"{sweep.csv} does not exist: there is nothing to report")
+            log(f"{sweep.csv} does not exist: there is nothing to report")
+            return None
     else:
         sweep.logs.mkdir(exist_ok=True)
         # What failed last time is tried again: the cause may have been fixed since.
@@ -1678,6 +1908,34 @@ def main(argv: list[str] | None = None) -> int:
     log(f"wrote {output / 'summary.md'}")
     failed = bool(sweep.state["failures"]) or any(warning.startswith("**Checksums") for warning in warnings)
     return 1 if failed else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_arguments(argv)
+    config = load_config(args.config, args.set)
+    output = (args.output or args.config.parent / "zarr-bench-results").resolve()
+    shapes = config["source"]["shape"]
+    if not shapes:
+        status = sweep_one(config, output, args)
+        if status is None:
+            raise SystemExit(f"{output / 'results.csv'} does not exist: there is nothing to report")
+        return status
+
+    statuses = []
+    for shape in shapes:
+        log(f"== shape {shape['name']}")
+        if args.dry_run:
+            print(f"== shape {shape['name']}")
+        statuses.append(sweep_one(shape_config(config, shape), output / shape["name"], args))
+    if args.dry_run:
+        return max(statuses)
+    if all(status is None for status in statuses):
+        raise SystemExit(f"no shape under {output} has results to report")
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "config.toml").write_text(dump_config(config))
+    write_site_report(config, output)
+    log(f"wrote {output / 'summary.md'}")
+    return max(status or 0 for status in statuses)
 
 
 if __name__ == "__main__":

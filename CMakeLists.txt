@@ -608,6 +608,16 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
                     -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
                     -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/bench-sweep
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_bench_sweep.cmake)
+
+            # The same over two synthetic shapes: a sweep each, and a report across them.
+            add_test(
+                NAME carta-zarr-bench-sweep-shapes
+                COMMAND ${CMAKE_COMMAND}
+                    -DUV=${CARTA_ZARR_UV}
+                    -DBENCH=$<TARGET_FILE:carta_zarr_bench>
+                    -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                    -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/bench-sweep-shapes
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_bench_sweep_shapes.cmake)
         else()
             message(STATUS "uv was not found; the zarr-bench generator tests are skipped")
         endif()

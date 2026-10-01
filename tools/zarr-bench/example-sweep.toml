@@ -30,6 +30,24 @@ synthetic = ""
 validate_synthetic = ""
 seed = 1
 
+# The best chunk depth depends on how large the plane is: deep chunks that suit a 512 x 512 cube make a
+# plane of a 2048 x 2048 one slow to read. When a site holds cubes of several sizes, list them in place
+# of crop and synthetic above, and each is a sweep of its own, in a directory named after it, with a
+# summary across them that says what one layout and one setting would serve them all. With path, each
+# takes a crop (and may take validate_crop); without it, each takes synthetic (and validate_synthetic).
+# channels is the depth of the cubes a shape stands for when it is measured on fewer -- a plane of an
+# SKA or ngVLA cube, tens of thousands of pixels square, cannot be rewritten hundreds of channels deep
+# for every layout -- and scales the modes that cover every channel to that depth in the summary.
+# weight is how much the shape counts in "one layout for every shape" (1.0).
+# [[source.shape]]
+# name = "askap"
+# synthetic = "frequency=2048,polarization=1,l=512,m=512"
+# [[source.shape]]
+# name = "ska"
+# synthetic = "frequency=64,polarization=1,l=32768,m=32768"
+# channels = 512
+# weight = 0.5
+
 [users]
 # How many people use CARTA on one server at once. carta-controller starts one backend per user, and
 # every backend takes the same settings, so they are chosen for the target -- the peak -- and the
@@ -92,9 +110,13 @@ open = 1.0
 
 [stage1]
 # Every combination of these is a layout. Axes are named as XRADIO names them; an axis left out of
-# chunk is 1, and one left out of shard is its chunk. "" is no shard, or no striping.
+# chunk is 1, and one left out of shard is its chunk. "" is no shard, or no striping. A shard may be
+# said relative to the chunk -- "frequency*8" is eight chunks along the spectrum, "l*4,m*4" four by
+# four on the sky -- so that it fits every chunk of the grid. On Lustre, a shard is one file where its
+# chunks would be many: fewer files for the metadata server, which every client shares, and a size
+# that can be a whole number of stripes.
 chunk = ["l=512,m=512,frequency=16", "l=256,m=256,frequency=64", "l=128,m=128,frequency=256"]
-shard = ["", "frequency=256"]
+shard = ["", "frequency*16"]
 codec = ["zstd:3", "blosc:zstd:5:shuffle"]
 consolidated = [true]
 stripe = [""]  # e.g. "lustre:count=4,size=4M" or "beegfs:count=4,size=1M"
