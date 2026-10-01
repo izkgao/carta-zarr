@@ -1,8 +1,5 @@
 # A cached chunk is not checked against storage again
 
-**Status: proposed, measured, not adopted.** This branch holds the change and its test; `dev` does not
-take it until a measurement shows a gain. See the end.
-
 Every array this library reads is opened with TensorStore's `recheck_cached_data` set to `"open"`: a
 chunk decoded after the array was opened is used from the cache as it is, without asking storage
 whether its file has changed. TensorStore's default, `true`, asks on every read.
@@ -38,7 +35,7 @@ under a running viewer was never something a read could rely on noticing.
 `tests/store_context_test.cc` pins the behaviour: once a copy's chunks are truncated, the handle that
 read them reads the same values again, and a handle opened afresh cannot read them at all.
 
-## Measurements, and why it waits
+## What it was measured to gain
 
 On almat3's Lustre 2.15 -- one client, an idle metadata server -- with every data cache emptied before
 each run by `tools/zarr-bench/drop-lustre-cache.py`, one user, on a 2048-channel crop of the ASKAP cube
@@ -59,6 +56,18 @@ files' metadata -- opening every file first changed nothing -- nor any read an o
 before the run: only a run of the bench itself evened it out. It holds for any comparison of builds or
 settings on Lustre, which is why the sweep now runs the bench once, untimed, on every dataset.
 
-The cost of the check may yet show where this measurement could not see it: many clients on one
-metadata server, under load. Until it does, the change gives up the guarantee for nothing measured,
-and `dev` keeps TensorStore's default.
+## Why it was adopted without a gain to show
+
+Nothing measured here argues against it either, and what the check is for does not apply to what
+CARTA reads. The check guards against a file that changed under an open array; a viewer's datasets do
+not change while it views them, and the metadata a changed file would also need is not checked again
+anyway. What the check costs depends on where the chunks are, and on almat3 they were where it costs
+least: one client holding the locks of every file it read, from a metadata server with nothing else
+to do. Many clients on one busy metadata server would pay more.
+
+Object storage would pay far more. TensorStore validates a cached chunk in S3 with a conditional GET,
+`If-None-Match` on the ETag it cached: an HTTP round trip of tens of milliseconds, billed as a
+request, for every chunk of every read the cache could have answered. A plane of a 7763 x 4742 cube in
+512 x 512 x 4 chunks spans some 150 chunks, so every redraw of a cached plane and every frame of an
+animation through cached chunks would wait on 150 requests. carta-zarr reads only local files today;
+when it reads S3, this is the setting it needs, and it is in place before then.
