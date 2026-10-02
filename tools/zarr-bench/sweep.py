@@ -656,6 +656,11 @@ class Sweep:
         temporary.write_text(json.dumps(self.state, indent=2, sort_keys=True) + "\n")
         temporary.replace(self.state_path)
 
+    def analysis(self, layouts: list[Layout]) -> "Analysis":
+        """What the results so far say about these layouts."""
+        datasets = self.state["datasets"]
+        return Analysis(self.config, datasets, Results(load_rows(self.csv), datasets), layouts, self.cores)
+
     def fail(self, what: str, reason: str) -> None:
         log(f"failed: {what}: {reason}")
         self.state["failures"][what] = reason
@@ -971,10 +976,23 @@ def frames_played(row: dict[str, str]) -> int:
 GroupKey = tuple[str, str, tuple[str, str, str, str], int, str, str]  # stage, dataset, setting, users, mode, method
 
 
+def load_rows(path: Path) -> list[dict[str, str]]:
+    """Every row of a results.csv, as carta-zarr-bench wrote them; none when there is no file yet."""
+    if not path.is_file():
+        return []
+    with open(path, newline="") as file:
+        return list(csv.DictReader(file))
+
+
 class Results:
-    def __init__(self, sweep: Sweep):
-        self.sweep = sweep
-        by_identity = {entry["identity_hash"]: key for key, entry in sweep.state["datasets"].items()}
+    """What a results.csv says, grouped the way the ranking compares it.
+
+    Made from rows rather than from a file, and from the datasets the sweep has written -- the
+    "datasets" table of its state, which is how a row's identity hash is known by the layout it
+    belongs to -- so that a ranking can be asked about with rows written out by hand."""
+
+    def __init__(self, rows: list[dict[str, str]], datasets: dict[str, Any]):
+        by_identity = {entry["identity_hash"]: key for key, entry in datasets.items()}
         self.groups: dict[GroupKey, Stats] = {}
         self.cold_methods: set[str] = set()
         self.cold_failures = 0
@@ -986,10 +1004,7 @@ class Results:
         # The tuning overrides each label's rows were measured with, as carta-zarr-bench reports them.
         self.tunings: dict[str, set[str]] = {}
         self.shapes: dict[str, str] = {}
-        rows = []
-        if sweep.csv.is_file():
-            with open(sweep.csv, newline="") as file:
-                rows = [row for row in csv.DictReader(file) if row["dataset_identity_hash"] in by_identity]
+        rows = [row for row in rows if row["dataset_identity_hash"] in by_identity]
         trial_ends: dict[tuple[GroupKey, str], float] = {}
         checksums: dict[tuple[Any, ...], dict[str, str]] = {}
         for row in rows:
@@ -1051,9 +1066,9 @@ class Results:
             method: str = "exact") -> Stats | None:
         return self.groups.get((stage, dataset, setting.key, users, mode, method))
 
-    def medians(self, stage: str, dataset: str, setting: Setting, users: int) -> dict[str, float]:
+    def medians(self, stage: str, dataset: str, setting: Setting, users: int, modes: list[str]) -> dict[str, float]:
         result = {}
-        for mode in self.sweep.config["measure"]["modes"]:
+        for mode in modes:
             stats = self.get(stage, dataset, setting, users, mode)
             result[mode] = stats.median if stats else math.inf
         return result
@@ -1098,33 +1113,40 @@ class Choice:
 
 
 class Analysis:
-    """What the results say, as far as the sweep has got."""
+    """What the results say, as far as the sweep has got.
 
-    def __init__(self, sweep: Sweep, layouts: list[Layout]):
-        self.sweep = sweep
-        self.results = Results(sweep)
+    Everything it reads is handed to it -- the configuration, the datasets the sweep has written, the
+    results and the cores the reader grid resolves against -- so a ranking can be checked against rows
+    written out by hand. Sweep.analysis makes one from a sweep on disk."""
+
+    def __init__(self, config: dict[str, Any], datasets: dict[str, Any], results: Results, layouts: list[Layout],
+                 cores: int):
+        self.config = config
+        self.datasets = datasets
+        self.results = results
         self.layouts = layouts
-        config = sweep.config
         self.modes = list(config["measure"]["modes"])
         self.weights = {mode: float(config["weights"].get(mode, 1.0)) for mode in self.modes}
         self.target = config["users"]["target"]
-        self.grid = reader_grid(config, sweep.cores)
+        self.baseline = setting_of(config["baseline"], cores)
+        self.grid = reader_grid(config, cores)
 
     def done(self, layout: Layout, validate: bool = False) -> bool:
-        return dataset_key(layout, validate) in self.sweep.state["datasets"]
+        return dataset_key(layout, validate) in self.datasets
 
     # -- stage1
 
     def stage1_ranking(self, users: int, weights: dict[str, float] | None = None) -> list[tuple[Layout, float, float]]:
         measured = [layout for layout in self.layouts if self.done(layout)]
-        medians = {layout.name: self.results.medians("stage1", dataset_key(layout, False), self.sweep.baseline, users)
+        medians = {layout.name: self.results.medians("stage1", dataset_key(layout, False), self.baseline, users,
+                                                     self.modes)
                    for layout in measured}
         best = bests(list(medians.values()), self.modes)
         ranked = [(layout, *score(medians[layout.name], best, weights or self.weights)) for layout in measured]
         return sorted(ranked, key=lambda entry: (entry[1], entry[0].name))
 
     def stage2_layouts(self) -> list[Layout]:
-        chosen = self.sweep.config["stage2"]["layouts"]
+        chosen = self.config["stage2"]["layouts"]
         by_name = {layout.name: layout for layout in self.layouts}
         if chosen:
             unknown = [name for name in chosen if name not in by_name]
@@ -1134,7 +1156,7 @@ class Analysis:
         else:
             ranked = [entry for entry in self.stage1_ranking(self.target)
                       if not entry[0].current and math.isfinite(entry[1])]
-            picked = [layout for layout, _, _ in ranked[: self.sweep.config["stage2"]["top"]]]
+            picked = [layout for layout, _, _ in ranked[: self.config["stage2"]["top"]]]
         current = by_name.get("current")
         if current and self.done(current) and current not in picked:
             picked.append(current)
@@ -1146,7 +1168,7 @@ class Analysis:
         choices = []
         for layout in self.stage2_layouts():
             for setting in self.grid:
-                medians = self.results.medians("stage2", dataset_key(layout, False), setting, self.target)
+                medians = self.results.medians("stage2", dataset_key(layout, False), setting, self.target, self.modes)
                 if any(math.isfinite(value) for value in medians.values()):
                     choices.append(Choice(layout, setting, math.inf, math.inf, medians))
         best = bests([choice.medians for choice in choices], self.modes)
@@ -1181,8 +1203,8 @@ class Analysis:
             settings = [entry.setting for entry in self.ranked_settings(choice.layout)[:3]]
             if choice.setting not in settings:
                 settings.insert(0, choice.setting)
-            if self.sweep.baseline not in settings:
-                settings.append(self.sweep.baseline)
+            if self.baseline not in settings:
+                settings.append(self.baseline)
             plan.append((choice.layout, settings))
         return plan
 
@@ -1194,13 +1216,13 @@ def run_sweep(sweep: Sweep, layouts: list[Layout]) -> None:
     for layout in layouts:
         sweep.measure(layout, sweep.stage1_runs())
 
-    analysis = Analysis(sweep, layouts)
+    analysis = sweep.analysis(layouts)
     candidates = analysis.stage2_layouts()
     log(f"stage2 layouts: {', '.join(layout.name for layout in candidates) or 'none'}")
     for layout in candidates:
         sweep.measure(layout, sweep.stage2_runs())
 
-    analysis = Analysis(sweep, layouts)
+    analysis = sweep.analysis(layouts)
     measure = sweep.config["measure"]
     for layout, settings in analysis.confirm_plan():
         runs = [Run("confirm", setting, users, tuple(measure["modes"]), measure["trials"])
@@ -1390,7 +1412,7 @@ def first_touch_advice(mode: str, shape: dict[str, int], chunk: dict[str, int], 
 def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout, str]]) -> list[str]:
     """Writes summary.md and returns the warnings, which also head it."""
     config = sweep.config
-    analysis = Analysis(sweep, layouts)
+    analysis = sweep.analysis(layouts)
     results = analysis.results
     target, modes = analysis.target, analysis.modes
     machine = json.loads((sweep.output / "machine.json").read_text()) if (sweep.output / "machine.json").is_file() else {}
@@ -1496,7 +1518,7 @@ def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout
     recommended = {choice.setting for choice in (now, after) if choice}
     for layout, settings in analysis.confirm_plan():
         for users in sweep.user_counts("confirm"):
-            measured = {setting: results.medians("confirm", dataset_key(layout, False), setting, users)
+            measured = {setting: results.medians("confirm", dataset_key(layout, False), setting, users, modes)
                         for setting in settings}
             best = bests(list(measured.values()), modes)
             for setting, medians in measured.items():
@@ -1540,8 +1562,8 @@ def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout
             if drifted:
                 warnings.append(f"**Validation moved a median by more than {VALIDATE_DRIFT * 100:.0f}%**: the smaller "
                                 "copy did not predict reads larger than RAM well.")
-            recommended = results.medians("validate", dataset, after.setting, target)
-            base = results.medians("validate", dataset, sweep.baseline, target)
+            recommended = results.medians("validate", dataset, after.setting, target, modes)
+            base = results.medians("validate", dataset, sweep.baseline, target, modes)
             best = bests([recommended, base], modes)
             if score(recommended, best, analysis.weights)[0] > score(base, best, analysis.weights)[0]:
                 warnings.insert(0, "**The recommended settings failed validation**: larger than RAM, they were slower "
@@ -1615,7 +1637,7 @@ def write_report(sweep: Sweep, layouts: list[Layout], invalid: list[tuple[Layout
                   f"{target} users (lower is better):", ""]
         lines += table(["layout", "score", "worst mode"],
                        [[layout.name, ratio_text(value), ratio_text(worst)] for layout, value, worst in ranking])
-        lines += tradeoff_section(analysis, ranking)
+        lines += tradeoff_section(sweep, analysis, ranking)
 
     lines += ["## Stage 2: reader settings", "", f"With {target} users. Score and worst are against the best of "
               "every layout and setting here; settings with a read budget cannot be given to the backend yet.", ""]
@@ -1707,9 +1729,9 @@ def warm_section(sweep: Sweep, analysis: Analysis, after: Choice | None, warning
     return lines + table(["variant", "overrides", "users"] + header, rows)
 
 
-def tradeoff_section(analysis: Analysis, ranking: list[tuple[Layout, float, float]]) -> list[str]:
+def tradeoff_section(sweep: Sweep, analysis: Analysis, ranking: list[tuple[Layout, float, float]]) -> list[str]:
     """Plane against spectrum: what each layout's chunk depth buys one and costs the other."""
-    sweep, results, target = analysis.sweep, analysis.results, analysis.target
+    results, target = analysis.results, analysis.target
     modes = [mode for mode in TRADEOFF_MODES if mode in analysis.modes]
     if not modes:
         return []
@@ -1822,7 +1844,7 @@ def write_site_report(config: dict[str, Any], output: Path) -> None:
             continue
         layouts, _ = stage1_layouts(sub_config)
         sweep = Sweep(sub_config, directory)
-        analysis = Analysis(sweep, layouts)
+        analysis = sweep.analysis(layouts)
         entries.append((shape, sub_config, sweep, analysis, analysis.recommendations()[1]))
     target = config["users"]["target"]
     lines = [f"# Storage tuning across cube shapes: {platform.node()}", "",
