@@ -660,6 +660,7 @@ void TestEachModeReads() {
     Require(stats.first_s > 0.0 && stats.median_s > 0.0 && stats.max_s >= stats.median_s,
             "a paced animation's frame times are not times");
     Require(stats.late <= whole.channel_count - 1, "more frames were late than were played");
+    Require(stats.frames == whole.channel_count, "an animation did not say how many frames it played");
     const auto [box, region_elements] = read(Mode::region);
     Require(region_elements == box.width * box.height * axes->channels, "a region did not cover its box");
     const auto region = runner.Fingerprint();

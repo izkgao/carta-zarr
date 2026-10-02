@@ -116,6 +116,7 @@ const std::vector<Column>& Columns() {
         {"sys_cpu_s", [](const Row& r) { return Text(r.sys_cpu_s); }},
         {"peak_rss_bytes", [](const Row& r) { return Text(r.peak_rss_bytes); }},
         {"checksum", [](const Row& r) { return r.checksum ? Hex(*r.checksum) : std::string(); }},
+        {"frames_played", [](const Row& r) { return Text(r.frames_played); }},
         {"frame_first_s", [](const Row& r) { return Text(r.frame_first_s); }},
         {"frame_median_s", [](const Row& r) { return Text(r.frame_median_s); }},
         {"frame_max_s", [](const Row& r) { return Text(r.frame_max_s); }},

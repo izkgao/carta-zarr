@@ -136,7 +136,7 @@ class WhatIsTimed(unittest.TestCase):
         channels plays five frames, however many were asked for."""
         one = layout("one")
         stats = self.stats([row(one, "animation", 1.2, frame_first_s="0.4", logical_bytes="500",
-                                animation_frames="32", position="pol=0;chan=0:5", late_frames="1",
+                                animation_frames="32", frames_played="5", late_frames="1",
                                 late_max_s="0.05")], one, "animation")
         self.assertAlmostEqual(stats.median, 0.2, msg="0.8 seconds over the four frames after the first, not 1.2 over all five")
         self.assertEqual(stats.logical_bytes, 100)

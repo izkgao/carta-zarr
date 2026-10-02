@@ -965,12 +965,10 @@ class Stats:
 
 
 def frames_played(row: dict[str, str]) -> int:
-    """The frames an animation played, from where it read: as many as asked for, or every channel of a
-    cube with fewer."""
-    match = re.search(r"chan=(\d+):(\d+)", row.get("position") or "")
-    if match:
-        return int(match.group(2)) - int(match.group(1))
-    return int(row.get("animation_frames") or 0)
+    """The frames an animation played, as carta-zarr-bench counted them: as many as asked for, or every
+    channel of a cube with fewer. It used to be read back out of the position the row describes, which
+    tied the ranking to how a human is shown where an operation read."""
+    return int(row.get("frames_played") or 0)
 
 
 GroupKey = tuple[str, str, tuple[str, str, str, str], int, str, str]  # stage, dataset, setting, users, mode, method

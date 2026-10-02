@@ -312,6 +312,7 @@ std::string Describe(const Error& error) {
             result.logical_bytes = *elements * item_size;
             result.checksum = runner->Fingerprint();
             if (const auto& frames = runner->frame_stats()) {
+                result.frames_played = frames->frames;
                 result.frame_first_s = frames->first_s;
                 result.frame_median_s = frames->median_s;
                 result.frame_max_s = frames->max_s;

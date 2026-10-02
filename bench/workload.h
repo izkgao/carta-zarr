@@ -93,6 +93,9 @@ void MarkSharedChunks(std::vector<std::vector<Operation>>& plans, const CubeAxes
 // How an animation's frames went, the first apart: it is a cold read whatever the layout, and what a
 // layout decides is how the frames after it go.
 struct FrameStats {
+    // The frames played, which is the channels the animation read: as many as were asked for, or every
+    // channel of a cube with fewer.
+    unsigned frames = 0;
     double first_s = 0.0;
     // The read times of every frame after the first.
     double median_s = 0.0;
