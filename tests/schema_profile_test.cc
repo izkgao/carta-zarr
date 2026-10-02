@@ -31,6 +31,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -776,6 +777,49 @@ void TestADeclaredFlagIsBinding() {
     Require(!missing, "an image declaring a flag variable that does not exist was opened");
 }
 
+// The listing's half of the same rule. An image whose declared flag cannot mask it is closed when it
+// is opened, so it has to be closed when it is listed too: it was listed openable and chosen as the
+// default, and a consumer offered an image it could not open.
+void TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing() {
+    const std::string sky_dimensions = R"(["time","frequency","polarization","l","m"])";
+    const auto listing = [&](const std::string& flag_node) {
+        auto nodes = CompleteStore();
+        nodes["SKY"] = SkyArray("float32", R"({"units":"Jy/beam","flag":"MASK_0"})");
+        nodes["MODEL"] = SkyArray();
+        if (!flag_node.empty()) {
+            nodes["MASK_0"] = flag_node;
+        }
+        auto store = Open(nodes);
+        Require(static_cast<bool>(store), "the declared-flag listing store did not open");
+        const auto profile = XradioProfile();
+        auto discovery = profile.Discover(store.value());
+        Require(static_cast<bool>(discovery), "discovery failed on the declared-flag listing store");
+        return std::make_pair(discovery.value(), profile.Describe(store.value(), "SKY"));
+    };
+
+    const auto usable = listing(NumericArray("[1,3,2,4,5]", sky_dimensions, "bool", R"({"type":"flag"})"));
+    Require(OpenableImageIds(usable.first.images) == std::vector<std::string>{"SKY", "MODEL"},
+            "an image whose declared flag can mask it was not listed openable");
+
+    const std::vector<std::pair<std::string, std::string>> unusable{
+        {"", "a declared flag that does not exist"},
+        {NumericArray("[1,3,2,4,4]", sky_dimensions, "bool", R"({"type":"flag"})"), "a flag of another shape"},
+        {NumericArray("[1,3,2,4,5]", sky_dimensions, "uint8", R"({"type":"flag"})"), "a flag that is not boolean"},
+    };
+    for (const auto& [flag_node, what] : unusable) {
+        const auto [discovery, sky] = listing(flag_node);
+        Require(ImageIds(discovery.images) == std::vector<std::string>{"SKY", "MODEL"},
+                "an image with " + what + " was dropped from the listing rather than listed with its reason");
+        Require(OpenableImageIds(discovery.images) == std::vector<std::string>{"MODEL"},
+                "an image with " + what + " was listed openable");
+        Require(discovery.default_image_id == "MODEL", "an image with " + what + " was chosen as the default");
+        Require(HasDiagnostic(discovery.images.front().diagnostics, carta::zarr::DiagnosticCode::invalid_metadata),
+                "an image with " + what + " was listed without saying why it will not open");
+        Require(!sky && sky.error().code == ErrorCode::invalid_metadata,
+                "describing an image with " + what + " was not refused as invalid metadata");
+    }
+}
+
 // With nothing declared the store is inspected instead, and a store offering two equally good
 // candidates is refused rather than guessed at. The refusal is a diagnostic on the image: the image
 // is still readable, just unmasked.
@@ -966,6 +1010,7 @@ int main() {
         TestTheInventorySaysWhatEachNodeIs();
         TestANodeThatWillNotParseIsDiagnosedNotRefused();
         TestADeclaredFlagIsBinding();
+        TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing();
         TestAmbiguousFlagsSelectNone();
         TestStoreRejections();
         TestSizeFallsBackWhenTheStoreCannotBeMeasured();
