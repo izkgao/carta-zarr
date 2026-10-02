@@ -137,7 +137,6 @@ among them without opening any.
 - [docs/storage-tuning.md](docs/storage-tuning.md) — choosing a Zarr layout and carta-backend's reader
   settings for Lustre or BeeGFS, what measurements found, and how to measure your own.
 - [docs/adr](docs/adr) — decisions and their alternatives.
-- [AGENTS.md](AGENTS.md) — building and testing without drowning in TensorStore's output.
 
 ## Licence
 
