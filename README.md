@@ -11,7 +11,10 @@ its public headers, which need only the C++ standard library.
 
 - **Image datasets** written by [XRADIO](https://github.com/casangi/xradio) 1.2.x: one Zarr v3 group
   holding sky-plane image variables and the coordinates they share. Schema id `xradio.image`,
-  schema version `1.2`.
+  schema version `1.2` -- the layout this library was checked against, not a schema version XRADIO
+  publishes. The conformance fixture is written by XRADIO 1.2.3 itself (see
+  [tests/data/README.md](tests/data/README.md)), and following a later XRADIO means pinning that
+  generator to it and seeing which assumption breaks.
 - **Images**: real-valued variables carrying all five of `time`, `frequency`, `polarization`, `l`
   and `m`. Complex and aperture-plane (`u`, `v`) variables are listed with a diagnostic saying why
   they cannot be opened.
@@ -20,6 +23,23 @@ its public headers, which need only the C++ standard library.
   to answer for them without reading each one.
 
 Writing is out of scope, and so is anything but the `xradio.image` profile.
+
+## Where the library ends
+
+The library decides how to reach the pixels; carta-backend decides what the numbers mean.
+
+Inside, from the bottom up: a **transport** gives raw access to a store's nodes -- the local
+filesystem, or memory in the tests, with a remote store as one more transport ([ADR 0004](docs/adr/0004-store-seam-at-the-transport.md)); the
+**store** reads the Zarr hierarchy and array metadata and knows nothing of images; a **schema
+profile** recognises an XRADIO dataset and describes its images by the role of each axis
+([ADR 0007](docs/adr/0007-the-schema-profile-table-keeps-its-dispatch.md), [ADR 0012](docs/adr/0012-an-axis-is-reached-by-its-role.md)); and **reads and reductions** walk the chunks those images are stored in,
+through TensorStore, which goes no further than this library.
+
+carta-backend keeps everything that gives the numbers a meaning: casacore coordinates and the
+`ImageInterface` it shows CARTA ([ADR 0002](docs/adr/0002-casacore-coordinates-without-fits.md)), regions and world coordinates, the statistics derived
+from totals, position-velocity images, moments and the protocol. A reduction belongs in this library
+only if it can be stated without any of those: counts, sums, extrema and histograms can be; a flux
+density, which needs the beam, or a position-velocity image, which needs world coordinates, cannot.
 
 ## Requirements
 
@@ -131,9 +151,6 @@ among them without opening any.
 ## Documentation
 
 - [CONTEXT.md](CONTEXT.md) — the vocabulary this codebase uses, and the words it avoids.
-- [docs/design.md](docs/design.md) — why the library is split from the backend the way it is.
-- [docs/read-api.md](docs/read-api.md) — the read and reduction API, and the reasoning behind its
-  output types and streaming shape.
 - [docs/storage-tuning.md](docs/storage-tuning.md) — choosing a Zarr layout and carta-backend's reader
   settings for Lustre or BeeGFS, what measurements found, and how to measure your own.
 - [docs/adr](docs/adr) — decisions and their alternatives.
