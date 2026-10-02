@@ -167,22 +167,14 @@ inline std::uint64_t AlignedBlockEnd(std::uint64_t begin, std::uint64_t desired,
     return std::min(first_at((chunk_index + 1) * chunk), total);
 }
 
-// How many chunks a strided selection spans along one axis.
-inline std::uint64_t ChunksSpanned(std::uint64_t start, std::uint64_t count, std::uint64_t stride,
-                                   std::uint64_t chunk) {
-    if (chunk == 0 || count == 0) {
-        return 1;
-    }
-    const auto last = start + ((count - 1) * (stride == 0 ? 1 : stride));
-    return (last / chunk) - (start / chunk) + 1;
-}
-
 // How many chunks a strided selection touches along one axis: the ones that hold a selected
 // element, which is what a walk decodes and so what its progress is counted in.
 //
-// Not ChunksSpanned. A stride of a chunk or more puts every selected element in a chunk of its own
-// and can step over whole chunks between them, which a span from first to last would count. Below
-// a chunk, no step is long enough to skip one, and the two agree.
+// Not the chunks from the first selected element to the last. A stride of a chunk or more puts every
+// selected element in a chunk of its own and can step over whole chunks between them, which a span
+// would count and nothing decodes. Below a chunk, no step is long enough to skip one, and the two
+// agree. There was a ChunksSpanned beside this, and piece sizing asked it rather than this, so a
+// strided read was sized for chunks it stepped over; this is the one answer now.
 inline std::uint64_t ChunksTouched(std::uint64_t start, std::uint64_t count, std::uint64_t stride,
                                    std::uint64_t chunk) {
     if (count == 0) {
@@ -191,7 +183,9 @@ inline std::uint64_t ChunksTouched(std::uint64_t start, std::uint64_t count, std
     if (chunk == 0 || stride >= chunk) {
         return count;
     }
-    return ChunksSpanned(start, count, stride, chunk);
+    // Below a chunk the chunks touched are every one from the first selected element's to the last's.
+    const auto last = start + ((count - 1) * (stride == 0 ? 1 : stride));
+    return (last / chunk) - (start / chunk) + 1;
 }
 
 // The chunks along an axis of `length` elements that a sample of every `stride`th element from the

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <exception>
 #include <string>
+#include <vector>
 
 #include "support/check.h"
 
@@ -111,13 +112,35 @@ void TestAMaskCostsOneByteAnElement() {
 // What a walk decodes along the spectrum, which is what its progress is counted in. The chunks a
 // selection spans from first to last are not that once a stride steps over whole chunks.
 void TestAStrideCountsOnlyTheChunksItLandsIn() {
-    using carta::zarr::internal::ChunksSpanned;
     using carta::zarr::internal::ChunksTouched;
     Require(ChunksTouched(1, 8, 1, 4) == 3, "channels 1 to 8 in chunks of four touch chunks 0, 1 and 2");
     Require(ChunksTouched(1, 8, 3, 4) == 6, "every third channel from 1 misses none of six chunks");
-    Require(ChunksTouched(0, 3, 9, 4) == 3, "channels 0, 9 and 18 land in three chunks");
-    Require(ChunksSpanned(0, 3, 9, 4) == 5, "and step over the two between them, which a span counts");
+    Require(ChunksTouched(0, 3, 9, 4) == 3,
+            "channels 0, 9 and 18 land in three chunks, not the five from the first to the last");
     Require(ChunksTouched(0, 0, 1, 4) == 0, "nothing selected touches nothing");
+}
+
+// Which chunks a sampled axis touches, named rather than counted, for a walk to go through. They are
+// the ones ChunksTouched counts, which is what keeps a walk's reads and its plan's layer one number.
+void TestASampleNamesTheChunksItTouches() {
+    using carta::zarr::internal::ChunksSampled;
+    using carta::zarr::internal::ChunksTouched;
+    using Chunks = std::vector<std::uint64_t>;
+    Require(ChunksSampled(16, 4, 8) == Chunks{0, 2}, "every eighth of 16 in chunks of four is in chunks 0 and 2");
+    Require(ChunksSampled(10, 4, 3) == Chunks{0, 1, 2}, "every third of 10 steps over no chunk");
+    Require(ChunksSampled(13, 4, 1) == Chunks{0, 1, 2, 3}, "every element touches every chunk, the partial one too");
+    Require(ChunksSampled(13, 4, 5) == Chunks{0, 1, 2}, "0, 5 and 10 miss the partial chunk at 12");
+    Require(ChunksSampled(0, 4, 1).empty(), "an axis of nothing touches nothing");
+    for (std::uint64_t length = 1; length <= 40; ++length) {
+        for (std::uint64_t chunk = 1; chunk <= 9; ++chunk) {
+            for (std::uint64_t stride = 1; stride <= 12; ++stride) {
+                const auto samples = ((length - 1) / stride) + 1;
+                Require(ChunksSampled(length, chunk, stride).size() == ChunksTouched(0, samples, stride, chunk),
+                        "named and counted disagree at length " + std::to_string(length) + ", chunk " +
+                            std::to_string(chunk) + ", stride " + std::to_string(stride));
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -128,6 +151,7 @@ int main() {
         TestAnOversizedChunkIsCappedRatherThanMultiplied();
         TestASmallChunkKeepsTheByteBudget();
         TestAMaskCostsOneByteAnElement();
+        TestASampleNamesTheChunksItTouches();
         TestAStrideCountsOnlyTheChunksItLandsIn();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "chunk blocks test failed: %s\n", error.what());
