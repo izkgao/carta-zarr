@@ -22,6 +22,8 @@
 
 namespace carta::zarr::internal {
 
+class Occupancy;
+
 // One region placed on the axes the walk reads in: u is the spatial axis the store varies fastest
 // and v is the other, so that a plane arrives with u contiguous and never has to be transposed on
 // the way in. A caller's x and y are mapped onto these once, at the top of the reduction.
@@ -29,22 +31,8 @@ namespace carta::zarr::internal {
 // Placed rather than "as the walk sees it", which is what it used to be called: a pass never knows
 // what a region is, so this is what a region looks like after the placement rather than something
 // the walk holds.
-struct PlacedRegion {
-    std::uint64_t u_start = 0;
-    std::uint64_t v_start = 0;
-    std::uint64_t u_size = 0;
-    std::uint64_t v_size = 0;
-    // Steps through the raster for one pixel of u and of v. One of them is 1; which one depends on
-    // whether the caller's rows run along u or across it.
-    const std::uint8_t* mask = nullptr;
-    std::uint64_t mask_u_stride = 1;
-    std::uint64_t mask_v_stride = 1;
-    // Runs along u, indexed by v, made by Occupancy::Of from the raster and owned by it. Null for a
-    // region that is its whole box, and for a raster too fragmented to be worth them, which is then
-    // read through `mask`.
-    const std::uint32_t* runs = nullptr;
-    const std::uint64_t* run_offsets = nullptr;
-
+class PlacedRegion {
+public:
     // The rows of this region inside the box [u0, u1) x [v0, v1), half-open. None when the region
     // misses the box along either axis, so that a caller adding up a row at a time adds nothing for
     // a region that has no pixels there.
@@ -99,10 +87,29 @@ struct PlacedRegion {
             return;
         }
         const std::uint8_t* selected =
-            mask == nullptr ? nullptr
-                            : mask + ((y - v_start) * mask_v_stride) + ((first - u_start) * mask_u_stride);
+            mask == nullptr ? nullptr : mask + ((y - v_start) * mask_v_stride) + ((first - u_start) * mask_u_stride);
         span(first, last, selected, mask == nullptr ? std::uint64_t{1} : mask_u_stride);
     }
+
+private:
+    // Occupancy places a region and reads these to bucket it; nothing else does. A reduction asks
+    // RowsWithin and ForEachSpan, so the encoding below can change without it noticing.
+    friend class Occupancy;
+
+    std::uint64_t u_start = 0;
+    std::uint64_t v_start = 0;
+    std::uint64_t u_size = 0;
+    std::uint64_t v_size = 0;
+    // Steps through the raster for one pixel of u and of v. One of them is 1; which one depends on
+    // whether the caller's rows run along u or across it.
+    const std::uint8_t* mask = nullptr;
+    std::uint64_t mask_u_stride = 1;
+    std::uint64_t mask_v_stride = 1;
+    // Runs along u, indexed by v, made by Occupancy::Of from the raster and owned by it. Null for a
+    // region that is its whole box, and for a raster too fragmented to be worth them, which is then
+    // read through `mask`.
+    const std::uint32_t* runs = nullptr;
+    const std::uint64_t* run_offsets = nullptr;
 };
 
 // A maximal run of consecutive chunk columns that at least one region touches, in bounding-box

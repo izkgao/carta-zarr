@@ -106,13 +106,11 @@ Result<Occupancy> Occupancy::Of(BufferView<const RegionMask> regions, std::uint6
     // mask decides instead, at the cost of one pass over it -- bytes the caller already holds, and
     // a fraction of what reading the chunks they would otherwise stand for costs.
     //
-    // A null mask means the whole bounding box, so there is nothing to narrow and nothing to scan.
+    // A region that is its whole box has nothing to narrow, and costs one row of each chunk row.
     std::vector<std::uint8_t> occupied;
 
     // Walk one region's chunk rows, marking the columns each row occupies and handing the marked
-    // cells over. The two ways a region can describe itself -- as runs, or as a raster -- differ in
-    // how a row is marked and in nothing else, so `mark_row` is the only part either of them
-    // supplies.
+    // cells over. How a row is marked is `mark_row`, which is the only part for_each_cell supplies.
     //
     // `found` stops a row scan once every column of the band is accounted for, and the raster
     // scanner reads `occupied` directly to skip a column already marked: without that it rescans
@@ -155,60 +153,42 @@ Result<Occupancy> Occupancy::Of(BufferView<const RegionMask> regions, std::uint6
         }
     };
 
+    // Every chunk cell one region occupies. The region says which pixels of a row it selects; what is
+    // decided here is only which chunk columns those fall in. A span whose every pixel is selected --
+    // a run, or a box -- occupies every column it crosses. A span read through the raster occupies a
+    // column once a selected pixel is found in it, and a column already marked is not looked at again.
+    //
+    // A box needs no pass of its own: its first row in a chunk row marks every column of it, and the
+    // scan stops there.
     const auto for_each_cell = [&](const PlacedRegion& region, auto&& visit) {
-        if (region.runs == nullptr && region.mask == nullptr) {
-            std::uint64_t cx0 = 0;
-            std::uint64_t cx1 = 0;
-            std::uint64_t cy0 = 0;
-            std::uint64_t cy1 = 0;
-            span(region, cx0, cx1, cy0, cy1);
-            for (auto cy = cy0; cy <= cy1; ++cy) {
-                for (auto cx = cx0; cx <= cx1; ++cx) {
-                    visit(cx, cy);
-                }
-            }
-            return;
-        }
-
-        if (region.runs != nullptr) {
-            scan_rows(
-                region,
-                [&](std::uint64_t y, auto&& mark, auto&&) {
-                    const auto r = static_cast<std::size_t>(y - region.v_start);
-                    for (auto k = region.run_offsets[r]; k < region.run_offsets[r + 1]; ++k) {
-                        const std::uint64_t run_begin = region.u_start + region.runs[2 * k];
-                        const std::uint64_t run_end = region.u_start + region.runs[(2 * k) + 1];
-                        if (run_begin >= run_end) {
-                            continue;
-                        }
-                        for (auto column = run_begin / chunk_u; column <= (run_end - 1) / chunk_u; ++column) {
-                            mark(column);
-                        }
-                    }
-                },
-                visit);
-            return;
-        }
-
         const std::uint64_t u_end = region.u_start + region.u_size;
         scan_rows(
             region,
             [&](std::uint64_t y, auto&& mark, auto&& marked) {
-                const std::uint8_t* row = region.mask + ((y - region.v_start) * region.mask_v_stride);
-                std::uint64_t x = region.u_start;
-                while (x < u_end) {
-                    const std::uint64_t column = x / chunk_u;
-                    const std::uint64_t boundary = std::min(u_end, (column + 1) * chunk_u);
-                    if (!marked(column)) {
-                        for (std::uint64_t k = x; k < boundary; ++k) {
-                            if (row[(k - region.u_start) * region.mask_u_stride] != 0) {
+                region.ForEachSpan(
+                    y, region.u_start, u_end,
+                    [&](std::uint64_t first, std::uint64_t last, const std::uint8_t* selected, std::uint64_t step) {
+                        if (selected == nullptr) {
+                            for (auto column = first / chunk_u; column <= (last - 1) / chunk_u; ++column) {
                                 mark(column);
-                                break;
                             }
+                            return;
                         }
-                    }
-                    x = boundary;
-                }
+                        std::uint64_t x = first;
+                        while (x < last) {
+                            const std::uint64_t column = x / chunk_u;
+                            const std::uint64_t boundary = std::min(last, (column + 1) * chunk_u);
+                            if (!marked(column)) {
+                                for (std::uint64_t k = x; k < boundary; ++k) {
+                                    if (selected[(k - first) * step] != 0) {
+                                        mark(column);
+                                        break;
+                                    }
+                                }
+                            }
+                            x = boundary;
+                        }
+                    });
             },
             visit);
     };

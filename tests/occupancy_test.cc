@@ -92,18 +92,17 @@ std::string Occupied(const Occupancy& occupancy) {
 std::string Spans(const PlacedRegion& region, std::uint64_t y, std::uint64_t u0, std::uint64_t u1,
                   const std::uint8_t* raster = nullptr) {
     std::string text;
-    region.ForEachSpan(y, u0, u1, [&](std::uint64_t first, std::uint64_t last, const std::uint8_t* mask,
-                                      std::uint64_t step) {
-        text += (text.empty() ? "" : " ") + std::to_string(first) + "-" + std::to_string(last);
-        if (mask != nullptr) {
-            text += "@" + std::to_string(mask - raster) + "/" + std::to_string(step);
-        }
-    });
+    region.ForEachSpan(y, u0, u1,
+                       [&](std::uint64_t first, std::uint64_t last, const std::uint8_t* mask, std::uint64_t step) {
+                           text += (text.empty() ? "" : " ") + std::to_string(first) + "-" + std::to_string(last);
+                           if (mask != nullptr) {
+                               text += "@" + std::to_string(mask - raster) + "/" + std::to_string(step);
+                           }
+                       });
     return text;
 }
 
-std::string RowsOf(const PlacedRegion& region, std::uint64_t u0, std::uint64_t u1, std::uint64_t v0,
-                   std::uint64_t v1) {
+std::string RowsOf(const PlacedRegion& region, std::uint64_t u0, std::uint64_t u1, std::uint64_t v0, std::uint64_t v1) {
     const auto rows = region.RowsWithin(u0, u1, v0, v1);
     return std::to_string(rows.first) + "-" + std::to_string(rows.last);
 }
@@ -139,19 +138,19 @@ void TestABoxOccupiesEveryChunkItsBoundingBoxTouches() {
     Require(occupancy.LayerChunks() == 4, "a 2 x 2 box did not report four chunks in a layer");
 }
 
+// Asked through what a reduction asks -- the rows a region has, and the span of each -- rather than
+// through the fields of the placement, which are the occupancy's own. The steps through the raster
+// are TestAFragmentedRasterIsReadThroughItsBytes's.
 void TestThePlacementFollowsTheFastestSpatialAxis() {
     const auto straight = Built({Box(2, 3, 6, 5)}, 4, 4, AxisRole::spatial_x);
     const auto& as_written = straight.regions().at(0);
-    Require(as_written.u_start == 2 && as_written.v_start == 3 && as_written.u_size == 6 &&
-                as_written.v_size == 5 && as_written.mask_u_stride == 1 && as_written.mask_v_stride == 6,
+    Require(RowsOf(as_written, 0, 100, 0, 100) == "3-8" && Spans(as_written, 3, 0, 100) == "2-8",
             "x was not placed on u when the store varies x fastest");
 
-    // The same region on a store that varies y fastest: x and y swap, and so do the steps through
-    // the raster the caller wrote in its own order.
+    // The same region on a store that varies y fastest: x and y swap.
     const auto swapped = Built({Box(2, 3, 6, 5)}, 4, 4, AxisRole::spatial_y);
     const auto& placed = swapped.regions().at(0);
-    Require(placed.u_start == 3 && placed.v_start == 2 && placed.u_size == 5 && placed.v_size == 6 &&
-                placed.mask_u_stride == 6 && placed.mask_v_stride == 1,
+    Require(RowsOf(placed, 0, 100, 0, 100) == "2-8" && Spans(placed, 2, 0, 100) == "3-8",
             "y was not placed on u when the store varies y fastest");
 }
 
@@ -181,12 +180,12 @@ void TestARasterReachesTheWalkAsRuns() {
     for (const auto fastest : {AxisRole::spatial_x, AxisRole::spatial_y}) {
         const auto occupancy = Built({region}, 4, 4, fastest);
         const auto& placed = occupancy.regions().at(0);
-        Require(placed.runs != nullptr && placed.run_offsets != nullptr, "a raster was not turned into runs");
+        // A span with no raster byte to read is a run; one read through the raster would say where.
         for (std::uint64_t line = 0; line < 16; ++line) {
-            Require(placed.run_offsets[line + 1] - placed.run_offsets[line] == 1, "a diagonal line is one run");
-            const auto k = placed.run_offsets[line];
-            Require(placed.runs[2 * k] == 4 * (line / 4) && placed.runs[(2 * k) + 1] == (4 * (line / 4)) + 4,
-                    "line " + std::to_string(line) + " holds the wrong run");
+            const auto expected = std::to_string(4 * (line / 4)) + "-" + std::to_string((4 * (line / 4)) + 4);
+            Require(Spans(placed, line, 0, 16, raster.data()) == expected,
+                    "line " + std::to_string(line) + " is not the one run " + expected + ": " +
+                        Spans(placed, line, 0, 16, raster.data()));
         }
         Require(Occupied(occupancy) == "0,0 1,1 2,2 3,3", "the runs did not narrow the occupancy to the diagonal");
     }
@@ -206,7 +205,8 @@ void TestAFragmentedRasterStaysARaster() {
     for (const auto fastest : {AxisRole::spatial_x, AxisRole::spatial_y}) {
         const auto occupancy = Built({region}, 4, 4, fastest);
         const auto& placed = occupancy.regions().at(0);
-        Require(placed.runs == nullptr && placed.mask == board.data(), "a checkerboard was not left a raster");
+        const auto expected = fastest == AxisRole::spatial_x ? "0-16@0/1" : "0-16@0/16";
+        Require(Spans(placed, 0, 0, 16, board.data()) == expected, "a checkerboard was not left a raster");
         Require(occupancy.LayerChunks() == 16, "a checkerboard touches every chunk of its box");
     }
 }
