@@ -426,6 +426,15 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         TEST_NAME carta-zarr-growing-histogram
         SOURCES tests/growing_histogram_test.cc)
 
+    # What a cube histogram counts into, and the answer it makes of it, given rows of pixels written
+    # out in the test. Header-only apart from the pool it splits a read across: the resolution rule,
+    # the per-task provisional histograms and the collection over them were reachable only through a
+    # walk over a fixture and a two-pass tolerance, and the first had already drifted from its doc.
+    carta_zarr_add_test(carta_zarr_provisional_histograms_tests INTERNAL
+        TEST_NAME carta-zarr-provisional-histograms
+        SOURCES tests/provisional_histograms_test.cc src/work_pool.cc
+        LIBRARIES Threads::Threads)
+
     # What a pass decides before it reads anything. Compiled against pass.cc alone: PlanPass touches
     # no store and no transport, so the read strategy -- which has moved more than once, and moved
     # in three places each time -- is checkable without a directory tree.

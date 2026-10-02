@@ -16,6 +16,7 @@
 #include "pixel_source.h"
 #include "reduce/footprint.h"
 #include "reduce/pass_plan.h"
+#include "reduce/slab.h"
 #include "zarr/pixel_selection.h"
 
 #include <algorithm>
@@ -27,30 +28,6 @@
 #include <vector>
 
 namespace carta::zarr::internal {
-
-/**
- * One read of the pass, handed to the visitor.
- *
- * A pointer and three strides rather than a packed buffer, because the destination comes back in
- * the store's own order and packing it would be the transpose the pass exists to avoid.
- *
- * A read, not a plane: a visitor that splits the work across threads needs a piece big enough to
- * pay for the dispatch, and a plane of a few hundred thousand pixels is not one. A visitor that
- * wants planes loops over `channel_count` itself, which costs it nothing.
- */
-struct Slab {
-    // Where this slab starts in the channel range its walk was given, which is what a visitor
-    // accumulating into a block of its own indexes by. Set by the walk, not by the reader: the
-    // reader is given an absolute index and has nothing to measure a relative one against.
-    BlockChannel first_channel;
-    std::uint64_t channel_count = 0;
-    const float* pixels = nullptr;
-    std::uint64_t stride_u = 1;
-    std::uint64_t stride_v = 1;
-    std::uint64_t stride_z = 1;
-    std::uint64_t u_count = 0;
-    std::uint64_t v_count = 0;
-};
 
 // Samples of `stride` that fall in [begin, end), as a start and a count.
 inline void SampledRange(std::uint64_t begin, std::uint64_t end, std::uint64_t stride, std::uint64_t& start,
