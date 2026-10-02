@@ -64,7 +64,7 @@ frame rate through the shared one, as CARTA's animator does, and records which f
   --animation-fps F          play animations at F frames a second, as CARTA's animator does; 0 reads
                              the frames back to back (5)
   --animation-prefetch       prefetch the next run of chunks along the spectrum in the background
-                             as each is entered, stopping after two the animation catches up with
+                             as each is entered, stopping once a frame is late while one is under way
   --region-fraction F        the share of the plane a region box covers (0.05)
   --histogram-method METHOD  exact, binned or sampled:N, as the backend's --zarr_histogram_method (exact)
   --seed N                   where the random positions come from (1)

@@ -434,13 +434,15 @@ Result<std::uint64_t> Runner::Run(const Operation& operation, const ReadOptions&
 // With prefetch, the first frame of each run of chunks along the spectrum is followed by a
 // Prefetch of the next run on a thread of its own, which decodes that run's chunks into the cache
 // while this run's frames play from it -- one at a time, so a prefetch is never started while one is
-// still under way. A prefetch the animation catches up with is late, and after
-// kLatePrefetchesBeforeStopping of them in a row there are no more for the rest of the animation:
-// storage that cannot keep ahead of one viewer is busy with something else, and reading ahead only
-// adds to what it is busy with.
+// still under way. A prefetch is for the time a frame leaves over: once a frame is late while one is
+// under way there are no more for the rest of the animation, since the machine has no time over and
+// decoding ahead takes it from the frames being played. Measured with eight animations of a
+// 7763 x 4742 cube at once, prefetches that kept ahead of every run still doubled the time of the
+// frames played from the cache. A prefetch the animation catches up with is counted as late, but is
+// no reason to stop: the frame that caught it waits for the decode under way rather than starting
+// another.
 Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOptions& options) {
     using Clock = std::chrono::steady_clock;
-    constexpr unsigned kLatePrefetchesBeforeStopping = 2;
     std::uint64_t hash = kFnvOffset;
     std::uint64_t elements = 0;
     Operation frame = operation;
@@ -455,7 +457,6 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
     std::thread prefetcher;
     std::atomic<bool> prefetched{true};
     std::optional<std::uint64_t> prefetching;
-    unsigned late_in_a_row = 0;
     bool reading_ahead = _prefetch;
     const auto prefetch = [&](std::uint64_t run) {
         if (prefetcher.joinable()) {
@@ -484,22 +485,19 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
     for (std::uint64_t index = 0; index < operation.channel_count; ++index) {
         frame.channel = operation.channel + index;
         const bool enters_run = index == 0 || run_of(frame.channel) != run_of(frame.channel - 1);
-        if (enters_run && prefetching == run_of(frame.channel)) {
-            if (!prefetched) {
-                ++stats.late_prefetches;
-                if (++late_in_a_row >= kLatePrefetchesBeforeStopping) {
-                    reading_ahead = false;
-                }
-            } else {
-                late_in_a_row = 0;
-            }
+        if (enters_run && prefetching == run_of(frame.channel) && !prefetched) {
+            ++stats.late_prefetches;
         }
         if (period > Clock::duration::zero()) {
             std::this_thread::sleep_until(turn);
         }
+        const bool overlapped = prefetcher.joinable() && !prefetched;
         const auto began = Clock::now();
         auto read = Read(frame, options);
         const auto done = Clock::now();
+        if (period > Clock::duration::zero() && done > turn + period && overlapped) {
+            reading_ahead = false;
+        }
         if (!read) {
             if (prefetcher.joinable()) {
                 prefetcher.join();

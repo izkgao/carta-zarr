@@ -102,7 +102,8 @@ struct FrameStats {
     unsigned late = 0;
     double late_max_s = 0.0;
     // Prefetches of the next run of chunks started, and how many of them the animation caught up with
-    // before they had finished. Zero without prefetch.
+    // before they had finished. Zero without prefetch. Prefetches stop once a frame is late while one
+    // is under way, so the first is the more telling.
     unsigned prefetches = 0;
     unsigned late_prefetches = 0;
 };
