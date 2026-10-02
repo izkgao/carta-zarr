@@ -566,6 +566,15 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         SOURCES tests/pass_timing.cc
         DEFINITIONS ${CARTA_ZARR_WIDE_FIXTURE})
 
+    # How tools/zarr-bench/sweep.py ranks what the bench measured, asked with rows written out in the
+    # test. It needs neither the bench nor a dataset, so it runs wherever uv does rather than only in a
+    # bench build: the ranking rules are what the end-to-end sweep below cannot check.
+    find_program(CARTA_ZARR_UV uv)
+    if(CARTA_ZARR_UV)
+        add_test(NAME carta-zarr-sweep-results
+            COMMAND ${CARTA_ZARR_UV} run --quiet --script ${CMAKE_CURRENT_SOURCE_DIR}/tests/sweep_results_test.py)
+    endif()
+
     #[[
       The layout generator under tools/zarr-bench is Python run by uv, which brings its own pinned
       interpreter and packages. The setup test writes small datasets with it into the build tree, and

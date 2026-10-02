@@ -454,6 +454,7 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
     const auto end = operation.channel + operation.channel_count;
 
     FrameStats stats;
+    stats.frames = static_cast<unsigned>(operation.channel_count);
     std::thread prefetcher;
     std::atomic<bool> prefetched{true};
     std::optional<std::uint64_t> prefetching;

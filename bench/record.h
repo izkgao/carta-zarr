@@ -25,7 +25,7 @@
 
 namespace carta::zarr::bench {
 
-inline constexpr int kCsvVersion = 6;
+inline constexpr int kCsvVersion = 7;
 
 // What a dataset's bench-manifest.json says, for the columns the library cannot answer. Empty for a
 // dataset the generator did not write, which the bench reads as well as any other.
@@ -97,7 +97,9 @@ struct Row {
     std::optional<double> sys_cpu_s;
     std::optional<std::uint64_t> peak_rss_bytes;
     std::optional<std::uint64_t> checksum;
-    // An animation's frames after the first, and the first on its own. See FrameStats.
+    // How many frames an animation played, its frames after the first, and the first on its own. See
+    // FrameStats.
+    std::optional<unsigned> frames_played;
     std::optional<double> frame_first_s;
     std::optional<double> frame_median_s;
     std::optional<double> frame_max_s;
