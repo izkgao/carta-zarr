@@ -217,7 +217,6 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
         return planned.error();
     }
     const auto& plan = planned.value();
-    const SelectionChannel end_of_selection{plan.planes.spectral.count};
 
     std::size_t provisional = request.provisional_bins;
     if (provisional == 0) {
@@ -231,8 +230,6 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
         rounded *= 2;
     }
     provisional = rounded;
-
-    const std::uint64_t total_chunks = plan.ChunksCovering(plan.layer_chunks, SelectionChannel{0}, end_of_selection);
 
     // One accumulator per task, which is safe because the split below never asks for more tasks than
     // there are accumulators, so no two bodies ever hold the same one at once. See the split itself
@@ -309,23 +306,19 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
         return result;
     };
 
-    std::uint64_t chunks_done = 0;
-    const auto walked = RunPass(
-        source, plan, options, SelectionChannel{}, end_of_selection, chunks_done,
-        [&](std::uint64_t done) -> Result<void> {
-            if (progress) {
-                CubeHistogramProgress update;
-                update.progress = static_cast<double>(done) / static_cast<double>(total_chunks);
-                // By reference and lazily: re-aggregating on every read would cost more than the
-                // binning does on a cube with thousands of them, and a caller that only draws a bar
-                // never asks.
-                update.snapshot = collect;
-                if (!progress(update)) {
-                    return Error{ErrorCode::cancelled, "The histogram was cancelled by its caller",
-                                 node};
-                }
+    auto pass = PassOverPlane(source, plan, options, "The histogram was cancelled by its caller");
+    const auto walked = pass.Whole(
+        [&](double fraction) {
+            if (!progress) {
+                return true;
             }
-            return {};
+            CubeHistogramProgress update;
+            update.progress = fraction;
+            // By reference and lazily: re-aggregating on every read would cost more than the
+            // binning does on a cube with thousands of them, and a caller that only draws a bar
+            // never asks.
+            update.snapshot = collect;
+            return progress(update);
         },
         [&](const Slab& slab) {
             // As in ComputeHistogram: hoisted so the per-pixel loop reads as it did before.
