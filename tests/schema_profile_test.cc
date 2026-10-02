@@ -820,6 +820,30 @@ void TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing() {
     }
 }
 
+// An image is described by the five axes this profile knows. One with a sixth used to be listed
+// openable and described with five, so every read of it failed on the rank it had not been told.
+void TestAnImageWithAnAxisBeyondTheFiveIsNotOpenable() {
+    auto nodes = CompleteStore();
+    nodes["MODEL"] = NumericArray("[1,3,2,4,5,1]", R"(["time","frequency","polarization","l","m","extra"])",
+                                  "float32", R"({"units":"Jy/beam"})");
+
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "the extra-axis store failed to open");
+    const auto profile = XradioProfile();
+    const auto discovery = profile.Discover(store.value());
+    Require(static_cast<bool>(discovery), "discovery failed on the extra-axis store");
+    Require(ImageIds(discovery.value().images) == std::vector<std::string>{"SKY", "MODEL"},
+            "the extra-axis image was dropped from the listing rather than listed with its reason");
+    Require(OpenableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
+            "an image with an axis this profile cannot describe was listed openable");
+    Require(HasDiagnostic(discovery.value().images.back().diagnostics, carta::zarr::DiagnosticCode::invalid_metadata),
+            "the extra-axis image was listed without saying why it will not open");
+
+    const auto model = profile.Describe(store.value(), "MODEL");
+    Require(!model && model.error().code == ErrorCode::invalid_metadata,
+            "an image with an axis this profile cannot describe was not refused as invalid metadata");
+}
+
 // With nothing declared the store is inspected instead, and a store offering two equally good
 // candidates is refused rather than guessed at. The refusal is a diagnostic on the image: the image
 // is still readable, just unmasked.
@@ -1011,6 +1035,7 @@ int main() {
         TestANodeThatWillNotParseIsDiagnosedNotRefused();
         TestADeclaredFlagIsBinding();
         TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing();
+        TestAnImageWithAnAxisBeyondTheFiveIsNotOpenable();
         TestAmbiguousFlagsSelectNone();
         TestStoreRejections();
         TestSizeFallsBackWhenTheStoreCannotBeMeasured();

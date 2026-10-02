@@ -124,6 +124,16 @@ NodeQualification QualifyNode(const Store& store, const NodeEntry& entry) {
                                                 "Complex sky-plane variables are not openable", std::string(node)},
                                      false};
         }
+        // The five axes are the whole of what an image is described by, so a sixth would be read with
+        // a selection one rank short -- every read refused, from an image listed as openable.
+        if (array.dimension_names.size() != kSkyAxes.size()) {
+            return NodeQualification{true, false,
+                                     Diagnostic{DiagnosticCode::invalid_metadata,
+                                                "Sky-plane variable has dimensions beyond time, frequency, "
+                                                "polarization, l and m",
+                                                std::string(node)},
+                                     true};
+        }
         if (auto disagreement = DisagreementWithCoordinates(store, array, node); disagreement) {
             return NodeQualification{true, false, std::move(disagreement), true};
         }
