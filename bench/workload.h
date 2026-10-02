@@ -105,8 +105,9 @@ struct FrameStats {
     unsigned late = 0;
     double late_max_s = 0.0;
     // Prefetches of the next run of chunks started, and how many of them the animation caught up with
-    // before they had finished. Zero without prefetch. Prefetches stop once a frame is late while one
-    // is under way, so the first is the more telling.
+    // before they had finished: ReadAheadStats's prefetches and caught_up. Zero without prefetch, or
+    // when the cache cannot hold two runs. Prefetches stop once a frame is late while one is under way,
+    // so the first is the more telling.
     unsigned prefetches = 0;
     unsigned late_prefetches = 0;
 };
@@ -132,8 +133,8 @@ public:
     // For open.
     Runner(ContextOptions context, std::string dataset, std::string image_id);
 
-    // How animations are played: at `fps` frames a second, 0 for back to back, and with the next run of
-    // chunks along the spectrum prefetched in the background as each is entered when `prefetch`.
+    // How animations are played: at `fps` frames a second, 0 for back to back, and reading ahead through
+    // ReadAhead when `prefetch`.
     void SetAnimation(double fps, bool prefetch) {
         _fps = fps;
         _prefetch = prefetch;
@@ -175,7 +176,6 @@ private:
     std::optional<CachePool> _first_touch;
     double _fps = 0.0;
     bool _prefetch = false;
-    std::uint64_t _spectral_chunk = 1;
     std::optional<FrameStats> _frame_stats;
     ContextOptions _context;
     std::string _dataset;

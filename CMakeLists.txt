@@ -52,6 +52,7 @@ add_library(carta_zarr SHARED
     src/dataset_size.cc
     src/read/pieces.cc
     src/read/pieces_read.cc
+    src/read_ahead.cc
     src/reduce/occupancy.cc
     src/reduce/region_runs.cc
     src/reduce/pass.cc
@@ -512,6 +513,22 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
     carta_zarr_add_test(carta_zarr_chunk_blocks_tests INTERNAL
         TEST_NAME carta-zarr-chunk-blocks
         SOURCES tests/chunk_blocks_test.cc)
+
+    # Reading ahead of an animation: which run is decoded ahead and when, against images whose
+    # prefetch the test holds up until it lets go. No store and no TensorStore -- the policy is runs,
+    # caches and a thread, and an image's own answers are a seam it stands behind.
+    carta_zarr_add_test(carta_zarr_read_ahead_tests INTERNAL
+        TEST_NAME carta-zarr-read-ahead
+        SOURCES tests/read_ahead_test.cc src/read_ahead.cc
+        LIBRARIES Threads::Threads)
+
+    # The same through what a consumer sees, on a real image: that the run read ahead lands in the
+    # cache the frames read through, and that a cache without room for two runs is declined in words.
+    carta_zarr_add_test(carta_zarr_read_ahead_image_tests PUBLIC
+        TEST_NAME carta-zarr-read-ahead-image
+        SOURCES tests/read_ahead_image_test.cc
+        LIBRARIES Threads::Threads
+        DEFINITIONS ${CARTA_ZARR_WIDE_FIXTURE})
 
     # Which chunks a set of regions occupies. LIBRARIES is empty and meant to stay empty: the
     # question is regions and a chunk shape in, an index out, so a target that starts needing a

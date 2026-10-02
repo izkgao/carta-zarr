@@ -190,3 +190,17 @@ Each task keeps its own and none is ever merged with another. At the end -- or w
 for a snapshot -- each is re-aggregated onto the caller's bins over the extremes, which are exact,
 and the counts are added. How fine it is, is what `provisional_bins` says.
 _Avoid_: partial, accumulator, tile histogram, intermediate histogram
+
+**Run**:
+The chunks one plane of an image decodes -- the plane rounded out to whole chunks, and a chunk deep
+along every other axis -- and so every plane that decodes the same ones. An animation playing through
+a run is served from the cache after its first frame; the frame that enters the next one decodes all
+of it.
+_Avoid_: chunk row, slab, group, block
+
+**Read-ahead**:
+Decoding the next run of a playing animation while the frames of this one play from the cache, so
+that the frame entering it does not stall. Told after every frame what was played, whether it was
+late, and what comes next; one decode under way at a time, and none once a frame is late while one
+is. A single decode ahead is a prefetch.
+_Avoid_: lookahead, preload, prefetching (for the whole policy)

@@ -642,8 +642,17 @@ void TestEachModeReads() {
 
     // Prefetching the next run of chunks changes when they are read, not what any frame reads; played
     // at a frame rate, every frame after the first is timed and none is late at a rate this slow on a
-    // fixture this small.
-    Runner prefetching(SharedContext(), image);
+    // fixture this small. Reading ahead needs a cache with room for two runs, which a context left to
+    // TensorStore's does not have.
+    ContextOptions caching;
+    caching.cache_bytes = std::size_t{64} << 20;
+    const auto cached = Context::Create(caching);
+    Require(cached.has_value(), "Context::Create failed");
+    const auto cached_dataset = Dataset::Open(*cached, kWide);
+    Require(cached_dataset.has_value(), "the wide fixture did not open through a cache");
+    const auto cached_image = cached_dataset->OpenImage(cached_dataset->descriptor().default_image_id.value_or(""));
+    Require(cached_image.has_value(), "the wide fixture's image did not open through a cache");
+    Runner prefetching(*cached, *cached_image);
     prefetching.SetAnimation(0.0, true);
     const auto whole = PlanOperations(Mode::animation, *axes, 1, 0, 1, 0, 1, 0.05, 4).front();
     Require(runner.Run(whole, {}).has_value() && prefetching.Run(whole, {}).has_value(), "an animation failed");
@@ -653,6 +662,10 @@ void TestEachModeReads() {
     Require(prefetching.frame_stats()->prefetches == 1 && runner.frame_stats()->prefetches == 0,
             "an animation of two runs did not prefetch the second, or prefetched without being asked");
     Require(prefetching.frame_stats()->late_prefetches <= 1, "more prefetches were late than were started");
+    Runner uncached(SharedContext(), image);
+    uncached.SetAnimation(0.0, true);
+    Require(uncached.Run(whole, {}).has_value() && uncached.frame_stats()->prefetches == 0,
+            "an animation read ahead into a cache that holds nothing");
     Runner paced(SharedContext(), image);
     paced.SetAnimation(20.0, true);
     Require(paced.Run(whole, {}).has_value() && paced.frame_stats().has_value(), "a paced animation kept no frame times");

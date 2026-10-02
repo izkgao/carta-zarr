@@ -5,8 +5,11 @@
  */
 
 #include "carta-zarr/carta_zarr.h"
+#include "carta-zarr/read_ahead.h"
 
+#include "pixel_mask.h"
 #include "read/pieces.h"
+#include "read_ahead.h"
 #include "reducible_image.h"
 #include "reduce/plane_histogram.h"
 #include "reduce/spectral_reduce.h"
@@ -21,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -208,6 +212,102 @@ Result<std::vector<Beam>> Image::ReadBeams() const {
     return Guarded(ErrorCode::invalid_metadata, _impl->descriptor.id, [&]() -> Result<std::vector<Beam>> {
         return _impl->profile.ReadBeams(*_impl->store, _impl->descriptor.id);
     });
+}
+
+namespace {
+
+// What reading ahead asks of one image, answered by the image: a run from its chunk geometry, what a
+// run holds from what its chunks decode to, and the decode itself by Image::Prefetch with the options
+// its frames are read with -- so into the cache they will look in.
+class ImageRuns final : public internal::RunSource {
+public:
+    ImageRuns(Image image, ReadOptions options, internal::CacheShare cache)
+        : _image(std::move(image)), _options(std::move(options)), _cache(cache) {}
+
+    internal::Run RunOf(const ReadRequest& plane) const override {
+        return internal::RunOf(_image.chunk_geometry(), plane);
+    }
+    std::uint64_t PlaneRunBytes() const override {
+        const auto& descriptor = _image.descriptor();
+        return internal::PlaneRunBytes(descriptor, _image.chunk_geometry(),
+                                       internal::AppliesPixelMask(_options, descriptor));
+    }
+    internal::CacheShare Cache() const override {
+        return _cache;
+    }
+    std::string Name() const override {
+        return _image.descriptor().id;
+    }
+    // Stopped by either reading ahead or the caller's own cancellation, whichever says so first.
+    bool Prefetch(const ReadRequest& plane, const std::function<bool()>& cancelled) const override {
+        ReadOptions options = _options;
+        const auto callers = options.control.cancellation_requested;
+        options.control.cancellation_requested = [&cancelled, callers] {
+            return cancelled() || (callers && callers());
+        };
+        return _image.Prefetch(plane, options).has_value();
+    }
+
+private:
+    Image _image;
+    ReadOptions _options;
+    internal::CacheShare _cache;
+};
+
+}  // namespace
+
+class ReadAhead::Impl {
+public:
+    explicit Impl(std::unique_ptr<internal::ReadingAhead> reading) : reading(std::move(reading)) {}
+
+    std::unique_ptr<internal::ReadingAhead> reading;
+};
+
+ReadAhead::ReadAhead(std::shared_ptr<Impl> impl) : _impl(std::move(impl)) {}
+ReadAhead::~ReadAhead() = default;
+
+Result<ReadAhead> ReadAhead::For(const std::vector<std::pair<Image, ReadOptions>>& images) {
+    return Guarded(ErrorCode::io_error, {}, [&]() -> Result<ReadAhead> {
+        std::vector<std::shared_ptr<const internal::RunSource>> sources;
+        sources.reserve(images.size());
+        for (const auto& [image, options] : images) {
+            // The cache a read keeps its chunks in: a pool of its own when it names one, otherwise the
+            // one its context shares among every read -- which holds nothing unless it was sized.
+            internal::CacheShare cache;
+            if (options.control.cache_pool) {
+                cache.identity = internal::CachePoolAccess::StoreContextOf(*options.control.cache_pool).get();
+                cache.bytes = options.control.cache_pool->bytes();
+            } else {
+                cache.identity = image._impl->context.get();
+                cache.bytes = image._impl->context->options.cache_bytes.value_or(0);
+            }
+            sources.push_back(std::make_shared<ImageRuns>(image, options, cache));
+        }
+        auto reading = internal::ReadingAhead::For(std::move(sources));
+        if (!reading) {
+            return reading.error();
+        }
+        return ReadAhead{std::make_shared<Impl>(std::move(reading).value())};
+    });
+}
+
+void ReadAhead::Served(Clock::time_point began, bool late, const std::vector<AnimatedPlane>& shown,
+                       const std::vector<std::vector<AnimatedPlane>>& upcoming) {
+    try {
+        _impl->reading->Served(began, late, shown, upcoming);
+    } catch (...) {
+        // Reading ahead is for time to spare, and a machine that cannot find the memory to decide what
+        // to read has none.
+        _impl->reading->Cancel();
+    }
+}
+
+void ReadAhead::Cancel() {
+    _impl->reading->Cancel();
+}
+
+ReadAheadStats ReadAhead::stats() const {
+    return _impl->reading->Stats();
 }
 
 class Dataset::Impl {

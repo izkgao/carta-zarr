@@ -55,6 +55,8 @@ private:
     friend class Image;
 };
 
+class ReadAhead;
+
 class CARTA_ZARR_EXPORT Image final {
 public:
     Image(const Image&) = default;
@@ -93,9 +95,10 @@ public:
     // names, and returns how many chunks that was. Nothing is written anywhere the caller can see:
     // the point is that a Read which follows finds them decoded.
     //
-    // For reading ahead of somebody -- the next run of chunks along the spectrum of a playing
-    // animation, while this run's frames are served from the cache -- where reading the pixels
-    // themselves would allocate and fill a destination only to throw it away. It reads one element
+    // For reading ahead of somebody -- the next run of chunks of a playing animation, while this run's
+    // frames are served from the cache -- where reading the pixels themselves would allocate and fill
+    // a destination only to throw it away. An animation need not call it: ReadAhead decides when, and
+    // calls it on a thread of its own. It reads one element
     // of each chunk, which decodes the whole chunk, so its cost is the decoding alone.
     //
     // A Read of the same chunks that starts before this has finished waits for the decode already
@@ -152,6 +155,8 @@ private:
     std::shared_ptr<Impl> _impl;
 
     friend class Dataset;
+    // Which cache an image's reads go through, which reading ahead has to hold two runs of it.
+    friend class ReadAhead;
 };
 
 class CARTA_ZARR_EXPORT Dataset final {
