@@ -177,6 +177,12 @@ Result<std::size_t> Image::Read(const ReadRequest& request, BufferView<float> de
     });
 }
 
+Result<std::uint64_t> Image::Prefetch(const ReadRequest& request, const ReadOptions& options) const {
+    return Guarded(ErrorCode::io_error, _impl->descriptor.id, [&] {
+        return internal::PrefetchChunks(_impl->source, _impl->descriptor, _impl->geometry, request, options);
+    });
+}
+
 Result<void> Image::ReduceSpectral(const SpectralReduceRequest& request, const SpectralSink& sink,
                                    const ReadOptions& options) const {
     return WithReducibleImage(_impl, [&](const internal::ReducibleImage& image) {

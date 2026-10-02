@@ -317,6 +317,8 @@ std::string Describe(const Error& error) {
                 result.frame_max_s = frames->max_s;
                 result.late_frames = frames->late;
                 result.late_max_s = frames->late_max_s;
+                result.prefetches = frames->prefetches;
+                result.late_prefetches = frames->late_prefetches;
             }
         } else {
             const bool expired = elements.error().code == ErrorCode::cancelled && end >= deadline;

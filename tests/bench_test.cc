@@ -648,6 +648,11 @@ void TestEachModeReads() {
     const auto whole = PlanOperations(Mode::animation, *axes, 1, 0, 1, 0, 1, 0.05, 4).front();
     Require(runner.Run(whole, {}).has_value() && prefetching.Run(whole, {}).has_value(), "an animation failed");
     Require(prefetching.Fingerprint() == runner.Fingerprint(), "prefetching changed what an animation read");
+    // The fixture's chunks are two channels deep, so four frames are two runs: the first frame
+    // prefetches the second run, and the second run has none after it to prefetch.
+    Require(prefetching.frame_stats()->prefetches == 1 && runner.frame_stats()->prefetches == 0,
+            "an animation of two runs did not prefetch the second, or prefetched without being asked");
+    Require(prefetching.frame_stats()->late_prefetches <= 1, "more prefetches were late than were started");
     Runner paced(SharedContext(), image);
     paced.SetAnimation(20.0, true);
     Require(paced.Run(whole, {}).has_value() && paced.frame_stats().has_value(), "a paced animation kept no frame times");

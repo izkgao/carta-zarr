@@ -121,6 +121,8 @@ const std::vector<Column>& Columns() {
         {"frame_max_s", [](const Row& r) { return Text(r.frame_max_s); }},
         {"late_frames", [](const Row& r) { return Text(r.late_frames); }},
         {"late_max_s", [](const Row& r) { return Text(r.late_max_s); }},
+        {"prefetches", [](const Row& r) { return Text(r.prefetches); }},
+        {"late_prefetches", [](const Row& r) { return Text(r.late_prefetches); }},
     };
     return columns;
 }

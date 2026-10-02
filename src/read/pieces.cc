@@ -98,4 +98,19 @@ std::vector<Piece> PlanPieces(const ImageDescriptor& descriptor, const ChunkGeom
     return pieces;
 }
 
+ReadRequest OneElementPerChunk(const ChunkGeometry& geometry, const ReadRequest& request) {
+    ReadRequest sample = request;
+    for (std::size_t axis = 0; axis < sample.axes.size(); ++axis) {
+        const std::uint64_t chunk = axis < geometry.chunk_shape.size() ? geometry.chunk_shape.at(axis) : 0;
+        auto& range = sample.axes.at(axis);
+        if (chunk == 0 || range.stride >= chunk) {
+            continue;
+        }
+        const std::uint64_t first = range.start / chunk;
+        const std::uint64_t last = (range.start + ((range.count - 1) * range.stride)) / chunk;
+        range = Range{first * chunk, last - first + 1, chunk};
+    }
+    return sample;
+}
+
 }  // namespace carta::zarr::internal

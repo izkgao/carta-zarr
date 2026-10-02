@@ -114,4 +114,25 @@ Result<std::size_t> ReadInPieces(const PixelSource& source, const ImageDescripto
     return static_cast<std::size_t>(elements);
 }
 
+Result<std::uint64_t> PrefetchChunks(const PixelSource& source, const ImageDescriptor& descriptor,
+                                     const ChunkGeometry& geometry, const ReadRequest& request,
+                                     const ReadOptions& options) {
+    // Checked as the request the caller made, so that a mistake in it is reported in its own terms
+    // rather than in those of the sample made from it.
+    if (auto checked = zarr::BuildSelection(descriptor, request, zarr::DestinationOrder::logical); !checked) {
+        return checked.error();
+    }
+    const auto sample = OneElementPerChunk(geometry, request);
+    std::uint64_t chunks = 1;
+    for (const auto& range : sample.axes) {
+        chunks *= range.count;
+    }
+    std::vector<float> discarded(static_cast<std::size_t>(chunks));
+    auto read = ReadInPieces(source, descriptor, geometry, sample, {discarded.data(), discarded.size()}, options, {});
+    if (!read) {
+        return read.error();
+    }
+    return chunks;
+}
+
 }  // namespace carta::zarr::internal

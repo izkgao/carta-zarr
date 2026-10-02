@@ -25,7 +25,7 @@
 
 namespace carta::zarr::bench {
 
-inline constexpr int kCsvVersion = 5;
+inline constexpr int kCsvVersion = 6;
 
 // What a dataset's bench-manifest.json says, for the columns the library cannot answer. Empty for a
 // dataset the generator did not write, which the bench reads as well as any other.
@@ -103,6 +103,8 @@ struct Row {
     std::optional<double> frame_max_s;
     std::optional<unsigned> late_frames;
     std::optional<double> late_max_s;
+    std::optional<unsigned> prefetches;
+    std::optional<unsigned> late_prefetches;
 };
 
 // The settings columns of a row, from the options and the dataset: everything a row says before

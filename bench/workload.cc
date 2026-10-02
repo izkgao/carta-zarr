@@ -8,12 +8,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <unordered_set>
 #include <utility>
 
@@ -427,11 +429,18 @@ Result<std::uint64_t> Runner::Run(const Operation& operation, const ReadOptions&
 //
 // Played at a frame rate, a frame is read no earlier than its turn and is late if it is not ready by
 // the end of it; a frame that runs over pushes the ones after it back, as a viewer waiting on it would
-// see. With prefetch, entering a run of chunks along the spectrum starts a read of the first plane of
-// the next run on a thread of its own, which decodes that run's chunks into the cache while this run's
-// frames play from it.
+// see.
+//
+// With prefetch, the first frame of each run of chunks along the spectrum is followed by a
+// Prefetch of the next run on a thread of its own, which decodes that run's chunks into the cache
+// while this run's frames play from it -- one at a time, so a prefetch is never started while one is
+// still under way. A prefetch the animation catches up with is late, and after
+// kLatePrefetchesBeforeStopping of them in a row there are no more for the rest of the animation:
+// storage that cannot keep ahead of one viewer is busy with something else, and reading ahead only
+// adds to what it is busy with.
 Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOptions& options) {
     using Clock = std::chrono::steady_clock;
+    constexpr unsigned kLatePrefetchesBeforeStopping = 2;
     std::uint64_t hash = kFnvOffset;
     std::uint64_t elements = 0;
     Operation frame = operation;
@@ -439,37 +448,50 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
     const auto& axes = *_axes;
     const auto period = _fps > 0.0 ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / _fps))
                                    : Clock::duration::zero();
-    if (_prefetch && _prefetched.size() < axes.width * axes.height) {
-        _prefetched.resize(axes.width * axes.height);
-    }
+    const auto run_of = [this](std::uint64_t channel) { return channel / _spectral_chunk; };
+    const auto end = operation.channel + operation.channel_count;
+
+    FrameStats stats;
     std::thread prefetcher;
-    const auto prefetch = [&](std::uint64_t channel) {
+    std::atomic<bool> prefetched{true};
+    std::optional<std::uint64_t> prefetching;
+    unsigned late_in_a_row = 0;
+    bool reading_ahead = _prefetch;
+    const auto prefetch = [&](std::uint64_t run) {
         if (prefetcher.joinable()) {
             prefetcher.join();
         }
-        prefetcher = std::thread([this, &axes, channel, polarization = operation.polarization, options] {
-            ReadRequest request;
-            request.axes.assign(axes.rank, Range{0, 1, 1});
-            request.axes[axes.x] = Range{0, axes.width, 1};
-            request.axes[axes.y] = Range{0, axes.height, 1};
-            request.axes[axes.spectral] = Range{channel, 1, 1};
-            if (axes.polarization) {
-                request.axes[*axes.polarization] = Range{polarization, 1, 1};
-            }
-            (void)_image->Read(request, {_prefetched.data(), axes.width * axes.height}, options);
+        ReadRequest request;
+        request.axes.assign(axes.rank, Range{0, 1, 1});
+        request.axes[axes.x] = Range{0, axes.width, 1};
+        request.axes[axes.y] = Range{0, axes.height, 1};
+        request.axes[axes.spectral] = Range{run * _spectral_chunk, 1, 1};
+        if (axes.polarization) {
+            request.axes[*axes.polarization] = Range{operation.polarization, 1, 1};
+        }
+        prefetching = run;
+        prefetched = false;
+        ++stats.prefetches;
+        prefetcher = std::thread([this, request, options, &prefetched] {
+            (void)_image->Prefetch(request, options);
+            prefetched = true;
         });
     };
 
-    FrameStats stats;
     std::vector<double> reads;
     const auto start = Clock::now();
     auto turn = start;
     for (std::uint64_t index = 0; index < operation.channel_count; ++index) {
         frame.channel = operation.channel + index;
-        if (_prefetch && _spectral_chunk > 1 && (index == 0 || frame.channel % _spectral_chunk == 0)) {
-            const auto next = (frame.channel / _spectral_chunk + 1) * _spectral_chunk;
-            if (next < operation.channel + operation.channel_count) {
-                prefetch(next);
+        const bool enters_run = index == 0 || run_of(frame.channel) != run_of(frame.channel - 1);
+        if (enters_run && prefetching == run_of(frame.channel)) {
+            if (!prefetched) {
+                ++stats.late_prefetches;
+                if (++late_in_a_row >= kLatePrefetchesBeforeStopping) {
+                    reading_ahead = false;
+                }
+            } else {
+                late_in_a_row = 0;
             }
         }
         if (period > Clock::duration::zero()) {
@@ -485,6 +507,9 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
             return read;
         }
         elements += *read;
+        if (reading_ahead && enters_run && (run_of(frame.channel) + 1) * _spectral_chunk < end) {
+            prefetch(run_of(frame.channel) + 1);
+        }
         // Played at a frame rate, only the last frame is fingerprinted: a plane of a large cube takes
         // longer to hash than a frame's turn, and hashing every one would make every frame late.
         if (period == Clock::duration::zero() || index + 1 == operation.channel_count) {
