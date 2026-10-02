@@ -34,7 +34,8 @@ namespace carta::zarr::internal {
  * first block's channels, and the totals hid it -- each block still read the right number of pixels
  * and produced a full count. Both numbers were std::uint64_t, so nothing could have said otherwise.
  *
- * The same fact was documented in three places instead (here, at SlabRequest, and at EmitBlock).
+ * The same fact was documented in three places instead (here, at SlabRequest, and at the block
+ * emitter that Pass has since absorbed).
  * Three comments describing one trap is the sign the type should be carrying it.
  *
  * An index plus a count is an index into the same run; two indices into one run are a count apart.
@@ -57,8 +58,8 @@ struct ChannelIndex {
 // `planes.spectral.start + index * planes.spectral.stride`.
 using SelectionChannel = ChannelIndex<struct SelectionChannelTag>;
 
-// An index into the channel range one RunPass was given, which is what a visitor accumulating into
-// a block of its own indexes by.
+// An index into the channel range one walk of a pass covers -- a block, or the whole run -- which is
+// what a visitor accumulating into a block of its own indexes by.
 using BlockChannel = ChannelIndex<struct BlockChannelTag>;
 
 /**

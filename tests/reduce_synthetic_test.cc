@@ -584,6 +584,222 @@ void TestProgressNeverClaimsTheWholeRunBeforeItsLastRead() {
     Require(wrong.empty(), "progress ran ahead of the reads:" + wrong);
 }
 
+// ---------------------------------------------------------------------------------------------
+// When a reduction hands over, and what it says about how far along it is, exactly.
+//
+// The tests above bound these: progress never claims the whole run early, a block is complete only
+// at its end. These pin them, read by read, at sizes small enough to count by hand, because the
+// numbers come from three places that have to agree -- the walk counts the chunks it has read, the
+// block or the run says what that is a fraction of, and which layer it is a fraction of depends on
+// whether the walk is over a plane or over a region set. Every value below is worked out in the
+// comment above it.
+
+// One hand-over, as a sink saw it.
+struct HandOver {
+    std::uint64_t first_channel = 0;
+    std::uint64_t channel_count = 0;
+    bool complete = false;
+    double completeness = 0.0;
+
+    bool operator==(const HandOver& other) const {
+        return first_channel == other.first_channel && channel_count == other.channel_count &&
+               complete == other.complete && completeness == other.completeness;
+    }
+};
+
+std::string Describe(const std::vector<HandOver>& handed) {
+    std::string text;
+    for (const auto& one : handed) {
+        text += "\n  [" + std::to_string(one.first_channel) + ", +" + std::to_string(one.channel_count) + ") " +
+                (one.complete ? "complete" : "partial") + " " + std::to_string(one.completeness);
+    }
+    return text;
+}
+
+void RequireHandOvers(const std::vector<HandOver>& handed, const std::vector<HandOver>& expected,
+                      const std::string& what) {
+    Require(handed == expected, what + ": handed over" + Describe(handed) + "\nrather than" + Describe(expected));
+}
+
+std::vector<HandOver> ReduceAndRecord(const SyntheticPixelSource& source, const ImageDescriptor& image,
+                                      const ChunkGeometry& geometry, const std::vector<carta::zarr::RegionMask>& regions,
+                                      const Range& spectral, const ReadOptions& options) {
+    WorkPool workers(1);
+    const auto reducible = Reducible(source, image, geometry, workers);
+    carta::zarr::SpectralReduceRequest request;
+    request.planes.spectral = spectral;
+    request.regions = {regions.data(), regions.size()};
+    request.statistics = carta::zarr::Statistic::sum;
+    std::vector<HandOver> handed;
+    const auto outcome = carta::zarr::internal::ReduceSpectral(
+        reducible, request,
+        [&](const carta::zarr::SpectralBlock& block) {
+            handed.push_back({block.first_channel, block.channel_count, block.complete, block.completeness});
+            return true;
+        },
+        options);
+    Require(static_cast<bool>(outcome), std::string("the reduction failed: ") + (outcome ? "" : outcome.error().message));
+    return handed;
+}
+
+// An 8 x 8 plane of 4 x 4 chunks, eight channels deep in chunks of four, read one chunk at a time.
+//
+// The plane histogram's blocks are the plan's: its layer is the plane's four chunks, and a budget
+// below one chunk affords one layer of them, which is one spectral chunk -- four channels. So two
+// blocks, each read as four one-chunk reads, each handed over before every read after its first,
+// at the chunks it has of the four it covers, and once more finished.
+void TestAPlaneHistogramHandsOverAtEveryReadOfItsBlock() {
+    const auto image = MakeImage(8, 8, 8);
+    const auto geometry = MakeGeometry(4, 4, 4);
+    SyntheticPixelSource source(image, geometry, Value);
+    WorkPool workers(1);
+    const auto reducible = Reducible(source, image, geometry, workers);
+
+    carta::zarr::HistogramRequest request;
+    request.planes.spectral = {0, 8, 1};
+    request.bins = 16;
+    request.lower = 0.0;
+    request.upper = 1000.0;
+    ReadOptions options;
+    options.read_budget_bytes = 1;
+
+    std::vector<HandOver> handed;
+    const auto outcome = carta::zarr::internal::ComputeHistogram(
+        reducible, request,
+        [&](const carta::zarr::HistogramBlock& block) {
+            handed.push_back({block.first_channel, block.channel_count, block.complete, block.completeness});
+            return true;
+        },
+        options);
+    Require(static_cast<bool>(outcome), "the histogram failed");
+    RequireHandOvers(handed,
+                     {{0, 4, false, 0.25}, {0, 4, false, 0.5}, {0, 4, false, 0.75}, {0, 4, true, 1.0},
+                      {4, 4, false, 0.25}, {4, 4, false, 0.5}, {4, 4, false, 0.75}, {4, 4, true, 1.0}},
+                     "a plane histogram");
+    Require(source.pixel_reads() == 8, "eight one-chunk reads, not " + std::to_string(source.pixel_reads()));
+}
+
+// The same image and budget, reduced over a region covering the whole plane. A region set's layer
+// is the chunks it occupies, which here is the plane's four, and the occupancy cuts them into four
+// one-chunk footprints because that is all a read affords. A block is walked footprint by footprint,
+// and the four footprints of one block share one count of reads: they report as the plane's four
+// bands do, not once per footprint.
+void TestARegionCoveringThePlaneHandsOverAsThePlaneDoes() {
+    const auto image = MakeImage(8, 8, 8);
+    const auto geometry = MakeGeometry(4, 4, 4);
+    SyntheticPixelSource source(image, geometry, Value);
+    ReadOptions options;
+    options.read_budget_bytes = 1;
+
+    const auto handed = ReduceAndRecord(source, image, geometry, {{0, 0, 8, 8}}, Range{0, 8, 1}, options);
+    RequireHandOvers(handed,
+                     {{0, 4, false, 0.25}, {0, 4, false, 0.5}, {0, 4, false, 0.75}, {0, 4, true, 1.0},
+                      {4, 4, false, 0.25}, {4, 4, false, 0.5}, {4, 4, false, 0.75}, {4, 4, true, 1.0}},
+                     "a region covering the plane");
+    Require(source.pixel_reads() == 8, "eight one-chunk reads, not " + std::to_string(source.pixel_reads()));
+}
+
+// Two regions in opposite corners of a 4 x 4 grid of chunks one channel deep, under a budget that
+// affords everything. They occupy two chunks of the sixteen, in two chunk rows, so they are two
+// footprints of one chunk each, and the four channels are one block that each footprint takes in a
+// single read.
+//
+// The block is handed over once between the two reads, and what it says is a fraction of the two
+// chunks the regions occupy -- four chunks read of eight -- not of the sixteen the plane holds, which
+// would be four of sixty-four.
+void TestTwoFootprintsHandOverAsAFractionOfWhatTheyOccupy() {
+    const auto image = MakeImage(16, 16, 4);
+    const auto geometry = MakeGeometry(4, 4, 1);
+    SyntheticPixelSource source(image, geometry, Value);
+    ReadOptions options;
+    options.read_budget_bytes = kRoomyBudget;
+
+    const auto handed =
+        ReduceAndRecord(source, image, geometry, {{0, 0, 4, 4}, {12, 12, 4, 4}}, Range{0, 4, 1}, options);
+    RequireHandOvers(handed, {{0, 4, false, 0.5}, {0, 4, true, 1.0}}, "two regions two footprints apart");
+    Require(source.pixel_reads() == 2, "one read a footprint, not " + std::to_string(source.pixel_reads()));
+}
+
+// One of those regions alone is one footprint taken in one read, and a block taken in one read is
+// handed over once, finished -- not once before its only read and again after it.
+void TestOneFootprintInOneReadHandsOverOnce() {
+    const auto image = MakeImage(16, 16, 4);
+    const auto geometry = MakeGeometry(4, 4, 1);
+    SyntheticPixelSource source(image, geometry, Value);
+    ReadOptions options;
+    options.read_budget_bytes = kRoomyBudget;
+
+    const auto handed = ReduceAndRecord(source, image, geometry, {{0, 0, 4, 4}}, Range{0, 4, 1}, options);
+    RequireHandOvers(handed, {{0, 4, true, 1.0}}, "one region in one chunk");
+    Require(source.pixel_reads() == 1, "one read, not " + std::to_string(source.pixel_reads()));
+}
+
+std::vector<double> CubeProgress(const SyntheticPixelSource& source, const ImageDescriptor& image,
+                                 const ChunkGeometry& geometry, const Range& spectral, std::uint64_t sample) {
+    WorkPool workers(1);
+    const auto reducible = Reducible(source, image, geometry, workers);
+    carta::zarr::CubeHistogramRequest request;
+    request.planes.spectral = spectral;
+    request.bins = 16;
+    request.spatial_sample = sample;
+    ReadOptions options;
+    options.read_budget_bytes = 1;
+    std::vector<double> reported;
+    const auto outcome = carta::zarr::internal::ComputeCubeHistogram(
+        reducible, request, options, [&](const carta::zarr::CubeHistogramProgress& update) {
+            reported.push_back(update.progress);
+            return true;
+        });
+    Require(static_cast<bool>(outcome), "the cube histogram failed");
+    return reported;
+}
+
+std::string Describe(const std::vector<double>& reported) {
+    std::string text;
+    for (const double one : reported) {
+        text += " " + std::to_string(one);
+    }
+    return text;
+}
+
+// A cube histogram is one run rather than blocks, and reports before every read after its first
+// and never after its last.
+//
+// The 8 x 8 x 8 image above in one-chunk reads is eight reads over a run of eight chunks -- four to
+// a layer, two layers deep -- so it reports seven times, at one through seven eighths.
+//
+// Sampled every eighth pixel, a 16 x 16 plane of 4 x 4 chunks keeps pixels only in the chunks whose
+// first row and column are multiples of eight: four of sixteen. The chunks it steps over entirely
+// are not read but are still counted, as they are passed, so the fraction jumps over them. Walking
+// the bands in order, with x marking a read and . a chunk stepped over:
+//
+//   x . x .    read 1 (no report), skip, read 2 at 2/16, skip
+//   . . . .    the whole band skipped: 8/16 by its end
+//   x . x .    read 3 at 8/16, skip, read 4 at 10/16, skip
+//   . . . .
+void TestACubeHistogramReportsEveryReadButItsFirst() {
+    {
+        const auto image = MakeImage(8, 8, 8);
+        const auto geometry = MakeGeometry(4, 4, 4);
+        SyntheticPixelSource source(image, geometry, Value);
+        const auto reported = CubeProgress(source, image, geometry, Range{0, 8, 1}, 1);
+        const std::vector<double> expected{1.0 / 8, 2.0 / 8, 3.0 / 8, 4.0 / 8, 5.0 / 8, 6.0 / 8, 7.0 / 8};
+        Require(reported == expected,
+                "a whole cube reported" + Describe(reported) + " rather than" + Describe(expected));
+        Require(source.pixel_reads() == 8, "eight one-chunk reads, not " + std::to_string(source.pixel_reads()));
+    }
+    {
+        const auto image = MakeImage(16, 16, 4);
+        const auto geometry = MakeGeometry(4, 4, 4);
+        SyntheticPixelSource source(image, geometry, Value);
+        const auto reported = CubeProgress(source, image, geometry, Range{0, 4, 1}, 8);
+        const std::vector<double> expected{2.0 / 16, 8.0 / 16, 10.0 / 16};
+        Require(reported == expected,
+                "a sampled cube reported" + Describe(reported) + " rather than" + Describe(expected));
+        Require(source.pixel_reads() == 4, "four reads, not " + std::to_string(source.pixel_reads()));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -595,6 +811,11 @@ int main() {
         TestAPlaneHistogramSplitAcrossWorkers();
         TestACubeHistogramSplitAcrossWorkers();
         TestProgressNeverClaimsTheWholeRunBeforeItsLastRead();
+        TestAPlaneHistogramHandsOverAtEveryReadOfItsBlock();
+        TestARegionCoveringThePlaneHandsOverAsThePlaneDoes();
+        TestTwoFootprintsHandOverAsAFractionOfWhatTheyOccupy();
+        TestOneFootprintInOneReadHandsOverOnce();
+        TestACubeHistogramReportsEveryReadButItsFirst();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "reduce synthetic test failed: %s\n", error.what());
         return 1;

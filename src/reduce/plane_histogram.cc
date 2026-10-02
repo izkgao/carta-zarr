@@ -9,7 +9,6 @@
 #include "chunk_blocks.h"
 #include "axis_map.h"
 #include "reduce/tuning.h"
-#include "reduce/block_emit.h"
 #include "reduce/growing_histogram.h"
 #include "reduce/pass.h"
 #include "reduce/plane_selection.h"
@@ -96,11 +95,7 @@ Result<void> ComputeHistogram(const ReducibleImage& image, const HistogramReques
     }
     const auto& plan = planned.value();
 
-    // A whole plane, so the layer the emit budget is spent against -- which is the same layer
-    // progress is counted in -- is the plan's own.
-    const std::size_t bytes_per_channel = static_cast<std::size_t>(request.bins) * sizeof(std::uint64_t);
-    const BlockEmitter emitter(plan, plan.layer_chunks, bytes_per_channel, request.emit_every_channels,
-                               "The histogram was cancelled by its sink");
+    auto pass = PassOverPlane(source, plan, options, "The histogram was cancelled by its sink");
 
     // The caller's own sequence: divide in double, narrow the width, compare against the narrowed
     // bounds. Doing any one of those in the other type moves pixels across bin edges.
@@ -122,8 +117,8 @@ Result<void> ComputeHistogram(const ReducibleImage& image, const HistogramReques
     }
 
     // One read's worth of pixels binned into the block's counts. Named rather than written
-    // into the call below, because a visitor nested inside the walk inside the emitter is
-    // three lambdas deep before the first loop.
+    // into the call below, because it is the longest of the three lambdas the pass is handed
+    // and written in place it would bury the other two.
     const auto bin_slab = [&](const Slab& slab) {
         // Hoisted into locals so that the loops below are the same text they were when the
         // pass handed these over as eight separate arguments.
@@ -187,11 +182,9 @@ Result<void> ComputeHistogram(const ReducibleImage& image, const HistogramReques
         }
     };
 
-    return emitter.Over(
-        [&](std::uint64_t length) { counts.assign(static_cast<std::size_t>(length) * bins, 0); },
-        [&](EmitBlock& block, const auto& report) {
-            return RunPass(source, plan, options, block.begin, block.end, block.chunks_done, report, bin_slab);
-        },
+    return pass.InBlocks(
+        bins * sizeof(std::uint64_t), request.emit_every_channels,
+        [&](std::uint64_t length) { counts.assign(static_cast<std::size_t>(length) * bins, 0); }, bin_slab,
         [&](SelectionChannel first_channel, std::uint64_t length, bool complete, double completeness) {
             HistogramBlock block;
             // Out of the type and into the public block, which is the one place it happens.
@@ -223,7 +216,6 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
         return planned.error();
     }
     const auto& plan = planned.value();
-    const SelectionChannel end_of_selection{plan.planes.spectral.count};
 
     std::size_t provisional = request.provisional_bins;
     if (provisional == 0) {
@@ -237,8 +229,6 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
         rounded *= 2;
     }
     provisional = rounded;
-
-    const std::uint64_t total_chunks = plan.ChunksCovering(plan.layer_chunks, SelectionChannel{0}, end_of_selection);
 
     // One accumulator per task, which is safe because the split below never asks for more tasks than
     // there are accumulators, so no two bodies ever hold the same one at once. See the split itself
@@ -315,23 +305,19 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
         return result;
     };
 
-    std::uint64_t chunks_done = 0;
-    const auto walked = RunPass(
-        source, plan, options, SelectionChannel{}, end_of_selection, chunks_done,
-        [&](std::uint64_t done) -> Result<void> {
-            if (progress) {
-                CubeHistogramProgress update;
-                update.progress = static_cast<double>(done) / static_cast<double>(total_chunks);
-                // By reference and lazily: re-aggregating on every read would cost more than the
-                // binning does on a cube with thousands of them, and a caller that only draws a bar
-                // never asks.
-                update.snapshot = collect;
-                if (!progress(update)) {
-                    return Error{ErrorCode::cancelled, "The histogram was cancelled by its caller",
-                                 node};
-                }
+    auto pass = PassOverPlane(source, plan, options, "The histogram was cancelled by its caller");
+    const auto walked = pass.Whole(
+        [&](double fraction) {
+            if (!progress) {
+                return true;
             }
-            return {};
+            CubeHistogramProgress update;
+            update.progress = fraction;
+            // By reference and lazily: re-aggregating on every read would cost more than the
+            // binning does on a cube with thousands of them, and a caller that only draws a bar
+            // never asks.
+            update.snapshot = collect;
+            return progress(update);
         },
         [&](const Slab& slab) {
             // As in ComputeHistogram: hoisted so the per-pixel loop reads as it did before.
