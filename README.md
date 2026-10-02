@@ -23,8 +23,34 @@ Writing is out of scope, and so is anything but the `xradio.image` profile.
 
 ## Requirements
 
-CMake 3.24, a C++17 compiler, and `nlohmann_json` 3.11 or newer. TensorStore 0.1.84 is fetched and
-built as part of the build, and brings its own zlib, zstd, blosc and protobuf.
+Install these before the first configure:
+
+| Tool | Version | Why |
+|---|---|---|
+| CMake | 3.24 or newer | TensorStore's own minimum. |
+| C++ compiler | GCC 10, Clang 8 or Apple Xcode 11.3.1, or newer | C++17, and the compilers TensorStore supports. |
+| Python 3 | 3.10 or newer | TensorStore's build turns its Bazel rules into CMake with a Python script at configure time, and the script uses `match`. Only the interpreter is needed. |
+| NASM | any | TensorStore's configure enables the NASM assembler for codecs it declares, although carta-zarr compiles none of them. |
+| patch | any | TensorStore patches some of its dependencies as it unpacks them. |
+
+The first configure also needs network access. It downloads TensorStore 0.1.84 and the 42 libraries
+TensorStore declares -- 169 MB of archives, 1.4 GB unpacked -- although only ten of them are compiled:
+TensorStore itself, Abseil, riegeli, re2, zstd, zlib, blosc, snappy, lz4 and nlohmann_json. Nothing
+else needs to be installed: those ten are linked into the library statically, and it exports none of
+their symbols, so they cannot collide with copies a consumer links itself. A release build tree takes
+about 1.3 GB.
+
+Built and tested with:
+
+- macOS 26 on Apple silicon: Apple clang 21, CMake 4.0, Python 3.13, NASM 3.01, from Homebrew
+  (`brew install cmake nasm python`) and the Xcode command line tools.
+- Ubuntu 24.04: GCC 13.3, CMake 3.28, Python 3.12, NASM 2.16
+  (`sudo apt-get install build-essential cmake python3 nasm patch`).
+- AlmaLinux 8.10 with conda-forge's GCC 13, CMake 3.29 and Python 3.12. Its own GCC 8 and Python 3.6
+  are too old.
+
+The storage benchmark, `-DCARTA_ZARR_BUILD_BENCH=ON`, also needs [`uv`](https://docs.astral.sh/uv/);
+see [tools/zarr-bench/README.md](tools/zarr-bench/README.md).
 
 ## Build, test, install
 
