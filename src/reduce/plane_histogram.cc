@@ -9,14 +9,13 @@
 #include "chunk_blocks.h"
 #include "axis_map.h"
 #include "reduce/tuning.h"
-#include "reduce/growing_histogram.h"
 #include "reduce/pass.h"
 #include "reduce/plane_selection.h"
+#include "reduce/provisional_histograms.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <vector>
 
@@ -217,93 +216,7 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
     }
     const auto& plan = planned.value();
 
-    std::size_t provisional = request.provisional_bins;
-    if (provisional == 0) {
-        provisional = std::clamp<std::size_t>(
-            static_cast<std::size_t>(request.bins) * kProvisionalBinsPerBin, kLeastProvisionalBins,
-            kMostProvisionalBins);
-    }
-    provisional = std::min<std::size_t>(provisional, kMaxHistogramBins);
-    std::size_t rounded = 2;
-    while (rounded < provisional) {
-        rounded *= 2;
-    }
-    provisional = rounded;
-
-    // One accumulator per task, which is safe because the split below never asks for more tasks than
-    // there are accumulators, so no two bodies ever hold the same one at once. See the split itself
-    // for why the cap that guarantees it is a cache budget rather than the pool's size.
-    //
-    // Tasks are claimed from a shared counter rather than divided up front, so task n is run by a
-    // different thread on each slab and an accumulator does move between cores as the pass
-    // advances. The pool hands the body a worker index that would avoid that, and nothing here uses
-    // it; whether it is worth anything is unmeasured. ADR 0005 records the state rather than
-    // pretending it is settled.
-    //
-    // Padded to a cache line because Add writes the range and a bin on every pixel, and two
-    // accumulators sharing a line would trade it between cores a billion times over a cube this
-    // size.
-    struct alignas(64) Accumulator {
-        explicit Accumulator(std::size_t bins) : growing(bins) {}
-
-        GrowingHistogram growing;
-        double num_pixels = 0.0;
-        double nan_count = 0.0;
-        double sum = 0.0;
-        double sum_sq = 0.0;
-        double minimum = std::numeric_limits<double>::infinity();
-        double maximum = -std::numeric_limits<double>::infinity();
-    };
-
-    // What limits the split is cache, not the pool: the budget is kCubeAccumulatorCacheBytes, which
-    // says why and what it was measured at. Divided by what one provisional histogram costs, it
-    // comes out at four accumulators at the default resolution.
-    const auto split = image.Split(kCubeAccumulatorCacheBytes, provisional * sizeof(std::uint64_t));
-    std::vector<Accumulator> accumulators(split.most(), Accumulator(provisional));
-
-    // The answer over whatever the accumulators hold, which is what the walk returns at the end and
-    // what it hands a caller that asks for a snapshot part of the way through. The two are the same
-    // thing: the extremes are exact for the pixels read so far, so the grid to re-aggregate onto is
-    // known at any point, not only at the last one.
-    //
-    // Safe to call from the progress hook because that runs between reads, with every worker done
-    // and nothing touching an accumulator.
-    const auto collect = [&]() {
-        CubeHistogramResult result;
-        result.sampled = request.spatial_sample > 1;
-        auto& totals = result.totals;
-        double smallest = std::numeric_limits<double>::infinity();
-        double largest = -std::numeric_limits<double>::infinity();
-        for (const auto& accumulator : accumulators) {
-            totals.num_pixels += accumulator.num_pixels;
-            totals.nan_count += accumulator.nan_count;
-            totals.sum += accumulator.sum;
-            totals.sum_sq += accumulator.sum_sq;
-            smallest = std::min(smallest, accumulator.minimum);
-            largest = std::max(largest, accumulator.maximum);
-        }
-
-        result.counts.assign(request.bins, 0);
-        // Nothing finite was read, so the extrema stay at the NaN SpectralTotals starts them at: the
-        // one place that answer is written, for this and for every spectral block.
-        if (totals.num_pixels == 0.0) {
-            return result;
-        }
-        totals.min = smallest;
-        totals.max = largest;
-
-        // Each accumulator re-aggregates onto the same target grid and the counts are added. No two
-        // provisional histograms are ever merged with each other, which is what makes their ranges
-        // having drifted apart not a problem: the grid they all land on comes from the extremes, and
-        // those are exact. An accumulator that saw nothing contributes zeros.
-        for (const auto& accumulator : accumulators) {
-            const auto part = accumulator.growing.Aggregate(request.bins, totals.min, totals.max);
-            for (std::size_t bin = 0; bin < result.counts.size(); ++bin) {
-                result.counts[bin] += part[bin];
-            }
-        }
-        return result;
-    };
+    ProvisionalHistograms histograms(image, request);
 
     auto pass = PassOverPlane(source, plan, options, "The histogram was cancelled by its caller");
     const auto walked = pass.Whole(
@@ -315,74 +228,16 @@ Result<CubeHistogramResult> ComputeCubeHistogram(const ReducibleImage& image,
             update.progress = fraction;
             // By reference and lazily: re-aggregating on every read would cost more than the
             // binning does on a cube with thousands of them, and a caller that only draws a bar
-            // never asks.
-            update.snapshot = collect;
+            // never asks. Safe because the pass reports between reads, with no Add under way.
+            update.snapshot = [&histograms]() { return histograms.Collect(); };
             return progress(update);
         },
-        [&](const Slab& slab) {
-            // As in ComputeHistogram: hoisted so the per-pixel loop reads as it did before.
-            const float* const base = slab.pixels;
-            const std::uint64_t stride_u = slab.stride_u;
-            const std::uint64_t stride_v = slab.stride_v;
-            const std::uint64_t stride_z = slab.stride_z;
-            const std::uint64_t u_count = slab.u_count;
-            const std::uint64_t v_count = slab.v_count;
-            const std::uint64_t channel_count = slab.channel_count;
-            // Rows of the whole read, numbered across its planes, rather than rows of one plane.
-            // A provisional histogram is half a megabyte, so a task has to be long enough to earn
-            // the cache it pulls in: split per plane, a task was a few hundred thousand pixels
-            // against that half megabyte and the pass ran slower than not splitting at all.
-            const auto take_rows = [&](std::uint64_t first, std::uint64_t last, Accumulator& into) {
-                // The scalars go into locals and are folded in once at the end. They are touched on
-                // every pixel, and leaving them in the accumulator would have the compiler reload
-                // them around each call into the histogram.
-                double num_pixels = 0.0;
-                double nan_count = 0.0;
-                double sum = 0.0;
-                double sum_sq = 0.0;
-                double minimum = std::numeric_limits<double>::infinity();
-                double maximum = -std::numeric_limits<double>::infinity();
-                for (std::uint64_t index = first; index < last; ++index) {
-                    const float* row =
-                        base + ((index / v_count) * stride_z) + ((index % v_count) * stride_v);
-                    for (std::uint64_t u = 0; u < u_count; ++u) {
-                        const float value = row[u * stride_u];
-                        if (!std::isfinite(value)) {
-                            nan_count += 1.0;
-                            continue;
-                        }
-                        const double v_value = value;
-                        num_pixels += 1.0;
-                        sum += v_value;
-                        sum_sq += v_value * v_value;
-                        minimum = std::min(minimum, v_value);
-                        maximum = std::max(maximum, v_value);
-                        into.growing.Add(value);
-                    }
-                }
-                into.num_pixels += num_pixels;
-                into.nan_count += nan_count;
-                into.sum += sum;
-                into.sum_sq += sum_sq;
-                into.minimum = std::min(into.minimum, minimum);
-                into.maximum = std::max(into.maximum, maximum);
-            };
-
-            const std::uint64_t rows = channel_count * v_count;
-            // By task, not by worker: the cap above can leave fewer accumulators than the pool has
-            // workers, and a task is the thing there is one accumulator for. Two tasks never run at
-            // once on the same accumulator because the split never asks for more tasks than it has
-            // accumulators. A read of one task binds into the first, on this thread.
-            split.Run(split.Tasks(u_count, rows), rows,
-                      [&](std::size_t task, std::uint64_t first, std::uint64_t last) {
-                          take_rows(first, last, accumulators[task]);
-                      });
-        });
+        [&](const Slab& slab) { histograms.Add(slab); });
     if (!walked) {
         return walked.error();
     }
 
-    return collect();
+    return histograms.Collect();
 }
 
 }  // namespace carta::zarr::internal
