@@ -32,6 +32,7 @@ using carta::zarr::AxisRole;
 using carta::zarr::ErrorCode;
 using carta::zarr::RegionMask;
 using carta::zarr::internal::Occupancy;
+using carta::zarr::internal::PlacedRegion;
 
 using carta::zarr::testing::Require;
 
@@ -83,6 +84,28 @@ std::string Occupied(const Occupancy& occupancy) {
         text += (text.empty() ? "" : " ") + std::to_string(cu) + "," + std::to_string(cv);
     }
     return text;
+}
+
+// Every span one row of a placed region selects inside [u0, u1), in order: "first-last" for a span
+// whose every pixel is selected, and "first-last@offset/step" for one read through the raster, the
+// offset counted from the raster's first byte.
+std::string Spans(const PlacedRegion& region, std::uint64_t y, std::uint64_t u0, std::uint64_t u1,
+                  const std::uint8_t* raster = nullptr) {
+    std::string text;
+    region.ForEachSpan(y, u0, u1, [&](std::uint64_t first, std::uint64_t last, const std::uint8_t* mask,
+                                      std::uint64_t step) {
+        text += (text.empty() ? "" : " ") + std::to_string(first) + "-" + std::to_string(last);
+        if (mask != nullptr) {
+            text += "@" + std::to_string(mask - raster) + "/" + std::to_string(step);
+        }
+    });
+    return text;
+}
+
+std::string RowsOf(const PlacedRegion& region, std::uint64_t u0, std::uint64_t u1, std::uint64_t v0,
+                   std::uint64_t v1) {
+    const auto rows = region.RowsWithin(u0, u1, v0, v1);
+    return std::to_string(rows.first) + "-" + std::to_string(rows.last);
 }
 
 // A raster whose pixel (x, y) of the bounding box is set when the chunk it falls in is on the
@@ -289,6 +312,79 @@ void TestAGridTooLargeToIndexIsRefused() {
             "a grid of 2^32 chunks was accepted");
 }
 
+// ---------------------------------------------------------------------------------------------
+// Which pixels of a chunk cell a region selects, a row at a time.
+//
+// The occupancy above says which cells a region touches; a reduction then has to know which pixels
+// of each cell to add up, and that used to be worked out again inside the accumulation -- the run
+// encoding, the raster's strides, and the clipping to the cell -- where nothing but a whole
+// reduction against an oracle could see it.
+
+// A region that is its whole box is one span a row, clipped to the cell, and no rows at all in a cell
+// it misses along either axis.
+void TestABoxIsOneSpanARowClippedToTheCell() {
+    const auto occupancy = Built({Box(2, 3, 6, 5)}, 4, 4);
+    const auto& region = occupancy.regions().at(0);
+    Require(RowsOf(region, 0, 4, 4, 8) == "4-8", "the box's rows in the cell below its top");
+    Require(Spans(region, 4, 0, 4) == "2-4", "the box clipped to the left cell, not " + Spans(region, 4, 0, 4));
+    Require(Spans(region, 4, 4, 8) == "4-8", "the box across the whole of the next");
+    Require(RowsOf(region, 8, 12, 0, 4) == "0-0", "a cell the box misses along u has no rows");
+    Require(RowsOf(region, 0, 4, 8, 12) == "0-0", "and one it misses along v has none either");
+}
+
+// A raster with runs few enough to be worth them is read as its runs, every pixel of each selected,
+// each clipped to the cell and none that falls outside it. Two runs in a line of 48 pixels is few
+// enough; in a line of 12 it would be fragmented, and read as the raster.
+void TestRunsAreClippedToTheCell() {
+    std::vector<std::uint8_t> raster(48, 0);
+    for (const std::uint64_t x : {1, 2, 3, 6, 7, 8, 9, 10}) {
+        raster.at(static_cast<std::size_t>(x)) = 1;
+    }
+    auto box = Box(0, 0, 48, 1);
+    box.mask = {raster.data(), raster.size()};
+    const auto occupancy = Built({box}, 4, 4);
+    const auto& region = occupancy.regions().at(0);
+    Require(Spans(region, 0, 0, 48) == "1-4 6-11", "the row's two runs, not " + Spans(region, 0, 0, 48, raster.data()));
+    Require(Spans(region, 0, 0, 4) == "1-4", "the first run alone in the first cell");
+    Require(Spans(region, 0, 4, 8) == "6-8", "the second clipped to the second cell, and the first left out");
+    Require(Spans(region, 0, 11, 12).empty(), "nothing in a cell between the runs and the edge");
+}
+
+// A raster too fragmented for runs is read through its bytes, and which way its rows lie decides the
+// steps. A store that varies y fastest -- which is what XRADIO writes, m last -- puts the caller's
+// columns along v and its rows along u, so one pixel along u is a whole raster row on.
+void TestAFragmentedRasterIsReadThroughItsBytes() {
+    std::vector<std::uint8_t> board(16 * 16, 0);
+    for (std::uint64_t y = 0; y < 16; ++y) {
+        for (std::uint64_t x = 0; x < 16; ++x) {
+            board.at(static_cast<std::size_t>((y * 16) + x)) = (x + y) % 2 == 0 ? 1 : 0;
+        }
+    }
+    auto box = Box(0, 0, 16, 16);
+    box.mask = {board.data(), board.size()};
+
+    // u is x: row y = 5 of the cell starting at x = 4 is byte 5 * 16 + 4, the next one on.
+    const auto along_x = Built({box}, 4, 4, AxisRole::spatial_x);
+    Require(Spans(along_x.regions().at(0), 5, 4, 8, board.data()) == "4-8@84/1",
+            "a raster along x, not " + Spans(along_x.regions().at(0), 5, 4, 8, board.data()));
+
+    // u is y: row v = x = 5 of the cell starting at y = 4 is byte 4 * 16 + 5, sixteen on.
+    const auto along_y = Built({box}, 4, 4, AxisRole::spatial_y);
+    Require(Spans(along_y.regions().at(0), 5, 4, 8, board.data()) == "4-8@69/16",
+            "a raster across y, not " + Spans(along_y.regions().at(0), 5, 4, 8, board.data()));
+}
+
+// The diagonal is runs whichever axis the store varies fastest: line 5 is the one run [4, 8).
+void TestADiagonalIsOneRunALineEitherWay() {
+    const auto raster = DiagonalRaster(16, 16, 4);
+    auto box = Box(0, 0, 16, 16);
+    box.mask = {raster.data(), raster.size()};
+    for (const auto fastest : {AxisRole::spatial_x, AxisRole::spatial_y}) {
+        const auto occupancy = Built({box}, 4, 4, fastest);
+        Require(Spans(occupancy.regions().at(0), 5, 0, 16) == "4-8", "line 5 of the diagonal is the run [4, 8)");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -303,6 +399,10 @@ int main() {
         TestAlikeRowsAreReadTogether();
         TestNoFootprintIsMoreThanOneRead();
         TestAGridTooLargeToIndexIsRefused();
+        TestABoxIsOneSpanARowClippedToTheCell();
+        TestRunsAreClippedToTheCell();
+        TestAFragmentedRasterIsReadThroughItsBytes();
+        TestADiagonalIsOneRunALineEitherWay();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "occupancy test failed: %s\n", error.what());
         return 1;

@@ -14,6 +14,7 @@
 #include "reduce/footprint.h"
 #include "reduce/region_runs.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -43,6 +44,65 @@ struct PlacedRegion {
     // read through `mask`.
     const std::uint32_t* runs = nullptr;
     const std::uint64_t* run_offsets = nullptr;
+
+    // The rows of this region inside the box [u0, u1) x [v0, v1), half-open. None when the region
+    // misses the box along either axis, so that a caller adding up a row at a time adds nothing for
+    // a region that has no pixels there.
+    struct Rows {
+        std::uint64_t first = 0;
+        std::uint64_t last = 0;
+    };
+    Rows RowsWithin(std::uint64_t u0, std::uint64_t u1, std::uint64_t v0, std::uint64_t v1) const noexcept {
+        const std::uint64_t first_u = std::max(u0, u_start);
+        const std::uint64_t last_u = std::min(u1, u_start + u_size);
+        const std::uint64_t first_v = std::max(v0, v_start);
+        const std::uint64_t last_v = std::min(v1, v_start + v_size);
+        if (first_u >= last_u || first_v >= last_v) {
+            return {};
+        }
+        return {first_v, last_v};
+    }
+
+    /**
+     * Every span of row `y` this region selects inside [u0, u1), in order, as
+     * `span(first, last, mask, mask_step)` over the pixels [first, last).
+     *
+     * `mask` is null when every pixel of the span is selected -- a run, or a region that is its whole
+     * box -- and otherwise points at the raster's byte for `first`, the next pixel's `mask_step` bytes
+     * on. Which of the three a region is, how its runs are encoded and which way its raster's rows
+     * lie are all said here and nowhere else.
+     *
+     * `y` must be one of the region's rows. `span` is a template parameter and must not become a
+     * std::function: a reduction's per-pixel loop is inside it. ADR 0005.
+     */
+    template <typename Span>
+    void ForEachSpan(std::uint64_t y, std::uint64_t u0, std::uint64_t u1, Span&& span) const {
+        const std::uint64_t first = std::max(u0, u_start);
+        const std::uint64_t last = std::min(u1, u_start + u_size);
+        if (first >= last) {
+            return;
+        }
+        if (runs != nullptr) {
+            const auto row = static_cast<std::size_t>(y - v_start);
+            for (auto k = run_offsets[row]; k < run_offsets[row + 1]; ++k) {
+                const std::uint64_t run_begin = u_start + runs[2 * k];
+                if (run_begin >= last) {
+                    break;  // runs ascend, so the rest are past the span
+                }
+                const std::uint64_t run_end = u_start + runs[(2 * k) + 1];
+                const std::uint64_t from = std::max(first, run_begin);
+                const std::uint64_t to = std::min(last, run_end);
+                if (from < to) {
+                    span(from, to, static_cast<const std::uint8_t*>(nullptr), std::uint64_t{1});
+                }
+            }
+            return;
+        }
+        const std::uint8_t* selected =
+            mask == nullptr ? nullptr
+                            : mask + ((y - v_start) * mask_v_stride) + ((first - u_start) * mask_u_stride);
+        span(first, last, selected, mask == nullptr ? std::uint64_t{1} : mask_u_stride);
+    }
 };
 
 // A maximal run of consecutive chunk columns that at least one region touches, in bounding-box
