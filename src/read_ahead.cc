@@ -199,7 +199,9 @@ void ReadingAhead::Cancel() {
 
 ReadAheadStats ReadingAhead::Stats() const {
     const std::scoped_lock lock(_mutex);
-    return _stats;
+    ReadAheadStats stats = _stats;
+    stats.under_way = _under_way;
+    return stats;
 }
 
 bool ReadingAhead::UnderWay() const {

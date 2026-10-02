@@ -81,13 +81,12 @@ public:
 };
 
 // Reading ahead of an animation over the images `sources` answer for. What ReadAhead is, behind its
-// handle; see the ADR 0016 and ReadAhead for the policy.
+// handle; see ReadAhead and ADR 0016 for the policy.
 class ReadingAhead {
 public:
     using Clock = std::chrono::steady_clock;
 
-    // How many frames ahead the next run is looked for. See ReadAhead::kUpcomingFrames.
-    static constexpr std::size_t kUpcomingFrames = 64;
+    static constexpr std::size_t kUpcomingFrames = ReadAhead::kUpcomingFrames;
 
     // Reading ahead over `sources`, or buffer_too_small, saying which, when a cache they read
     // through cannot hold two runs of every one of them that reads through it; invalid_argument
@@ -115,8 +114,6 @@ public:
     void Cancel();
 
     ReadAheadStats Stats() const;
-
-    // Whether a prefetch is under way. For the tests, which wait for one to finish.
     bool UnderWay() const;
 
 private:

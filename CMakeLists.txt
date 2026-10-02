@@ -522,6 +522,14 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         SOURCES tests/read_ahead_test.cc src/read_ahead.cc
         LIBRARIES Threads::Threads)
 
+    # The same through what a consumer sees, on a real image: that the run read ahead lands in the
+    # cache the frames read through, and that a cache without room for two runs is declined in words.
+    carta_zarr_add_test(carta_zarr_read_ahead_image_tests PUBLIC
+        TEST_NAME carta-zarr-read-ahead-image
+        SOURCES tests/read_ahead_image_test.cc
+        LIBRARIES Threads::Threads
+        DEFINITIONS ${CARTA_ZARR_WIDE_FIXTURE})
+
     # Which chunks a set of regions occupies. LIBRARIES is empty and meant to stay empty: the
     # question is regions and a chunk shape in, an index out, so a target that starts needing a
     # plan, a store or a thread pool has been handed something that is not its question. The 180
