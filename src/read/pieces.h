@@ -80,6 +80,36 @@ Result<std::size_t> ReadInPieces(const PixelSource& source, const ImageDescripto
                                  BufferView<float> destination, const ReadOptions& options,
                                  const ProgressCallback& progress);
 
+/**
+ * One selected element in every chunk that `request` touches, and no more.
+ *
+ * Reading a single element of a chunk decodes all of it, so this request decodes exactly the chunks
+ * a read of `request` would, into whatever cache the read goes through, while asking for a
+ * destination of one float a chunk rather than one a pixel. A plane of a 7763 x 4742 image in
+ * 512 x 512 chunks is 160 of them, where reading the plane itself is 147 MB to allocate and fill.
+ *
+ * Along an axis the chunks a request touches are consecutive unless its stride is a chunk or more,
+ * in which case every element it selects is in a chunk of its own already and the range is kept as
+ * it is. Otherwise the range becomes the first element of each chunk from the one its start is in to
+ * the one its last element is in -- an element of the chunk in either case, though not one the
+ * request selected.
+ *
+ * Pure, and the request has been checked against the descriptor already.
+ */
+ReadRequest OneElementPerChunk(const ChunkGeometry& geometry, const ReadRequest& request);
+
+/**
+ * Decode the chunks a read of `request` would decode, keeping them wherever options.control's
+ * cache pool says, and hand back nothing but how many there were.
+ *
+ * A read of OneElementPerChunk(request) through ReadInPieces, so it is checked, cancelled and masked
+ * exactly as a read is: with the mask applied the flag's chunks are decoded too, which a read that
+ * follows will want.
+ */
+Result<std::uint64_t> PrefetchChunks(const PixelSource& source, const ImageDescriptor& descriptor,
+                                     const ChunkGeometry& geometry, const ReadRequest& request,
+                                     const ReadOptions& options);
+
 
 }  // namespace carta::zarr::internal
 

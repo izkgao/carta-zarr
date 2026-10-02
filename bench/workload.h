@@ -101,6 +101,11 @@ struct FrameStats {
     // when the frames are read back to back, which gives them no turn to miss.
     unsigned late = 0;
     double late_max_s = 0.0;
+    // Prefetches of the next run of chunks started, and how many of them the animation caught up with
+    // before they had finished. Zero without prefetch. Prefetches stop once a frame is late while one
+    // is under way, so the first is the more telling.
+    unsigned prefetches = 0;
+    unsigned late_prefetches = 0;
 };
 
 // Runs operations against one image and remembers enough of the last result to fingerprint it.
@@ -125,7 +130,7 @@ public:
     Runner(ContextOptions context, std::string dataset, std::string image_id);
 
     // How animations are played: at `fps` frames a second, 0 for back to back, and with the next run of
-    // chunks along the spectrum read in the background as each is entered when `prefetch`.
+    // chunks along the spectrum prefetched in the background as each is entered when `prefetch`.
     void SetAnimation(double fps, bool prefetch) {
         _fps = fps;
         _prefetch = prefetch;
@@ -168,7 +173,6 @@ private:
     double _fps = 0.0;
     bool _prefetch = false;
     std::uint64_t _spectral_chunk = 1;
-    std::vector<float> _prefetched;
     std::optional<FrameStats> _frame_stats;
     ContextOptions _context;
     std::string _dataset;

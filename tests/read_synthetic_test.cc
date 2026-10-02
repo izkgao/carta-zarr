@@ -37,6 +37,8 @@ using carta::zarr::ProgressCallback;
 using carta::zarr::ReadControl;
 using carta::zarr::ReadOptions;
 using carta::zarr::ReadRequest;
+using carta::zarr::internal::OneElementPerChunk;
+using carta::zarr::internal::PrefetchChunks;
 using carta::zarr::internal::ReadInPieces;
 using carta::zarr::testing::SyntheticPixelSource;
 
@@ -316,6 +318,79 @@ void TestDecliningTheMaskReadsNoFlag() {
 
 }  // namespace
 
+// A box that starts and ends inside chunks: two chunks along l from 5 to 29, two along frequency from
+// 1 to 3, one along m. Each axis becomes the first element of each chunk it touches.
+ReadRequest UnalignedBox() {
+    ReadRequest request;
+    request.axes = {Range{5, 25, 1}, Range{3, 10, 1}, Range{1, 3, 1}, Range{0, 1, 1}, Range{0, 1, 1}};
+    return request;
+}
+
+void TestASampleTakesOneElementOfEachChunk() {
+    const auto sample = OneElementPerChunk(MakeGeometry(), UnalignedBox());
+    const Range expected[]{{0, 2, 16}, {0, 1, 20}, {0, 2, 2}, {0, 1, 1}, {0, 1, 1}};
+    for (std::size_t axis = 0; axis < 5; ++axis) {
+        const auto& range = sample.axes.at(axis);
+        Require(range.start == expected[axis].start && range.count == expected[axis].count &&
+                    range.stride == expected[axis].stride,
+                "axis " + std::to_string(axis) + " of the sample is not the first element of each chunk it touches");
+    }
+
+    // A stride of a chunk or more already puts every element in a chunk of its own, and may skip
+    // chunks between them, which spanning first to last would read.
+    ReadRequest strided = WholeCube();
+    strided.axes.at(0) = Range{3, 2, 40};
+    Require(OneElementPerChunk(MakeGeometry(), strided).axes.at(0).stride == 40,
+            "a stride of more than a chunk was widened to the chunks between its elements");
+}
+
+// The point of a prefetch: the chunks a read would decode, each once, and nothing to show for it but
+// the count -- one element read a chunk, against the 750 the box selects.
+void TestAPrefetchDecodesWhatAReadWould() {
+    const auto image = MakeImage();
+    const auto geometry = MakeGeometry();
+    SyntheticPixelSource read_source(image, geometry, Value);
+    std::vector<float> box(25 * 10 * 3, kUntouched);
+    Require(static_cast<bool>(ReadInPieces(read_source, image, geometry, UnalignedBox(),
+                                           BufferView<float>{box.data(), box.size()}, ReadOptions{}, ProgressCallback{})),
+            "the box could not be read");
+
+    SyntheticPixelSource source(image, geometry, Value);
+    const auto chunks = PrefetchChunks(source, image, geometry, UnalignedBox(), ReadOptions{});
+    Require(chunks && *chunks == 4, "a prefetch of the box did not say it decoded its four chunks");
+    Require(source.chunks_touched() == read_source.chunks_touched(),
+            "a prefetch touched " + std::to_string(source.chunks_touched()) + " chunks where a read touches " +
+                std::to_string(read_source.chunks_touched()));
+    Require(source.most_hits_on_one_chunk() == 1, "a prefetch decoded a chunk twice");
+    Require(source.elements_read() == 4, "a prefetch read more than one element a chunk");
+}
+
+// With the mask applied a read decodes the flag's chunks as well, so a prefetch for it does too; and
+// a request a read would refuse is refused before anything is read.
+void TestAPrefetchIsMaskedAndCheckedAsAReadIs() {
+    const auto image = MakeImage(true);
+    const auto geometry = MakeGeometry();
+    SyntheticPixelSource source(image, geometry, Value);
+    Require(static_cast<bool>(PrefetchChunks(source, image, geometry, UnalignedBox(), ReadOptions{})),
+            "a prefetch of a masked image failed");
+    Require(source.mask_reads() == 1, "a prefetch of a masked image did not decode the flag's chunks");
+
+    ReadOptions unmasked;
+    unmasked.apply_pixel_mask = false;
+    SyntheticPixelSource declined(image, geometry, Value);
+    Require(static_cast<bool>(PrefetchChunks(declined, image, geometry, UnalignedBox(), unmasked)) &&
+                declined.mask_reads() == 0,
+            "a prefetch that declined the mask decoded the flag's chunks");
+
+    ReadRequest beyond = UnalignedBox();
+    beyond.axes.at(2) = Range{4, 3, 1};
+    SyntheticPixelSource refused(image, geometry, Value);
+    const auto past = PrefetchChunks(refused, image, geometry, beyond, ReadOptions{});
+    Require(!past && past.error().code == ErrorCode::invalid_argument,
+            "a prefetch past the end of an axis was not refused");
+    Require(refused.pixel_reads() == 0 && refused.mask_reads() == 0, "a refused prefetch read something");
+}
+
 int main() {
     try {
         TestAFailedFlagLeavesTheDestinationAlone();
@@ -326,6 +401,9 @@ int main() {
         TestEachPieceIsHandedTheRestOfTheBuffer();
         TestAFlaggedPixelArrivesAsNaN();
         TestDecliningTheMaskReadsNoFlag();
+        TestASampleTakesOneElementOfEachChunk();
+        TestAPrefetchDecodesWhatAReadWould();
+        TestAPrefetchIsMaskedAndCheckedAsAReadIs();
         std::cout << "carta-zarr read synthetic tests passed\n";
         return 0;
     } catch (const std::exception& error) {

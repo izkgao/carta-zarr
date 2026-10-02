@@ -89,6 +89,21 @@ public:
     Result<std::size_t> Read(const ReadRequest& request, BufferView<float> destination,
                              const ReadOptions& options = {}, const ProgressCallback& progress = {}) const;
 
+    // Decodes the chunks a Read of `request` would decode, into the cache that options.control
+    // names, and returns how many chunks that was. Nothing is written anywhere the caller can see:
+    // the point is that a Read which follows finds them decoded.
+    //
+    // For reading ahead of somebody -- the next run of chunks along the spectrum of a playing
+    // animation, while this run's frames are served from the cache -- where reading the pixels
+    // themselves would allocate and fill a destination only to throw it away. It reads one element
+    // of each chunk, which decodes the whole chunk, so its cost is the decoding alone.
+    //
+    // A Read of the same chunks that starts before this has finished waits for the decode already
+    // under way rather than starting another, as long as what is cached is not checked against
+    // storage again; see ADR 0015. Checked, cancelled and masked as Read is, so with the pixel mask
+    // applied its chunks are decoded too. Safe to call concurrently with Read on one handle.
+    Result<std::uint64_t> Prefetch(const ReadRequest& request, const ReadOptions& options = {}) const;
+
     // Reduces every region over the same channels in one pass over the pixels, handing results to
     // the sink block by block.
     //

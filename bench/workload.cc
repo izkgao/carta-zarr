@@ -8,12 +8,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <thread>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <unordered_set>
 #include <utility>
 
@@ -427,9 +429,18 @@ Result<std::uint64_t> Runner::Run(const Operation& operation, const ReadOptions&
 //
 // Played at a frame rate, a frame is read no earlier than its turn and is late if it is not ready by
 // the end of it; a frame that runs over pushes the ones after it back, as a viewer waiting on it would
-// see. With prefetch, entering a run of chunks along the spectrum starts a read of the first plane of
-// the next run on a thread of its own, which decodes that run's chunks into the cache while this run's
-// frames play from it.
+// see.
+//
+// With prefetch, the first frame of each run of chunks along the spectrum is followed by a
+// Prefetch of the next run on a thread of its own, which decodes that run's chunks into the cache
+// while this run's frames play from it -- one at a time, so a prefetch is never started while one is
+// still under way. A prefetch is for the time a frame leaves over: once a frame is late while one is
+// under way there are no more for the rest of the animation, since the machine has no time over and
+// decoding ahead takes it from the frames being played. Measured with eight animations of a
+// 7763 x 4742 cube at once, prefetches that kept ahead of every run still doubled the time of the
+// frames played from the cache. A prefetch the animation catches up with is counted as late, but is
+// no reason to stop: the frame that caught it waits for the decode under way rather than starting
+// another.
 Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOptions& options) {
     using Clock = std::chrono::steady_clock;
     std::uint64_t hash = kFnvOffset;
@@ -439,45 +450,54 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
     const auto& axes = *_axes;
     const auto period = _fps > 0.0 ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / _fps))
                                    : Clock::duration::zero();
-    if (_prefetch && _prefetched.size() < axes.width * axes.height) {
-        _prefetched.resize(axes.width * axes.height);
-    }
+    const auto run_of = [this](std::uint64_t channel) { return channel / _spectral_chunk; };
+    const auto end = operation.channel + operation.channel_count;
+
+    FrameStats stats;
     std::thread prefetcher;
-    const auto prefetch = [&](std::uint64_t channel) {
+    std::atomic<bool> prefetched{true};
+    std::optional<std::uint64_t> prefetching;
+    bool reading_ahead = _prefetch;
+    const auto prefetch = [&](std::uint64_t run) {
         if (prefetcher.joinable()) {
             prefetcher.join();
         }
-        prefetcher = std::thread([this, &axes, channel, polarization = operation.polarization, options] {
-            ReadRequest request;
-            request.axes.assign(axes.rank, Range{0, 1, 1});
-            request.axes[axes.x] = Range{0, axes.width, 1};
-            request.axes[axes.y] = Range{0, axes.height, 1};
-            request.axes[axes.spectral] = Range{channel, 1, 1};
-            if (axes.polarization) {
-                request.axes[*axes.polarization] = Range{polarization, 1, 1};
-            }
-            (void)_image->Read(request, {_prefetched.data(), axes.width * axes.height}, options);
+        ReadRequest request;
+        request.axes.assign(axes.rank, Range{0, 1, 1});
+        request.axes[axes.x] = Range{0, axes.width, 1};
+        request.axes[axes.y] = Range{0, axes.height, 1};
+        request.axes[axes.spectral] = Range{run * _spectral_chunk, 1, 1};
+        if (axes.polarization) {
+            request.axes[*axes.polarization] = Range{operation.polarization, 1, 1};
+        }
+        prefetching = run;
+        prefetched = false;
+        ++stats.prefetches;
+        prefetcher = std::thread([this, request, options, &prefetched] {
+            (void)_image->Prefetch(request, options);
+            prefetched = true;
         });
     };
 
-    FrameStats stats;
     std::vector<double> reads;
     const auto start = Clock::now();
     auto turn = start;
     for (std::uint64_t index = 0; index < operation.channel_count; ++index) {
         frame.channel = operation.channel + index;
-        if (_prefetch && _spectral_chunk > 1 && (index == 0 || frame.channel % _spectral_chunk == 0)) {
-            const auto next = (frame.channel / _spectral_chunk + 1) * _spectral_chunk;
-            if (next < operation.channel + operation.channel_count) {
-                prefetch(next);
-            }
+        const bool enters_run = index == 0 || run_of(frame.channel) != run_of(frame.channel - 1);
+        if (enters_run && prefetching == run_of(frame.channel) && !prefetched) {
+            ++stats.late_prefetches;
         }
         if (period > Clock::duration::zero()) {
             std::this_thread::sleep_until(turn);
         }
+        const bool overlapped = prefetcher.joinable() && !prefetched;
         const auto began = Clock::now();
         auto read = Read(frame, options);
         const auto done = Clock::now();
+        if (period > Clock::duration::zero() && done > turn + period && overlapped) {
+            reading_ahead = false;
+        }
         if (!read) {
             if (prefetcher.joinable()) {
                 prefetcher.join();
@@ -485,6 +505,9 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
             return read;
         }
         elements += *read;
+        if (reading_ahead && enters_run && (run_of(frame.channel) + 1) * _spectral_chunk < end) {
+            prefetch(run_of(frame.channel) + 1);
+        }
         // Played at a frame rate, only the last frame is fingerprinted: a plane of a large cube takes
         // longer to hash than a frame's turn, and hashing every one would make every frame late.
         if (period == Clock::duration::zero() || index + 1 == operation.channel_count) {

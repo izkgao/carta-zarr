@@ -117,15 +117,37 @@ CARTA's 5 frames a second, a 7763 x 4742 cube in 512 x 512 x 4 chunks stalled fo
 fourth frame for one user, and in 512 x 512 x 16 chunks for up to 400 ms every sixteenth; 512-square
 cubes barely stalled at all.
 
-carta-backend does not read ahead. One that did -- starting a read of the next run in the background
-as soon as an animation enters one -- was simulated with `--animation-prefetch`, and for one user it
-hid every stall, at 5 and at 10 frames a second, on condition that the cache held two runs: a run is
-the plane's area times the chunk depth times four bytes, 589 MB for the 512 x 512 x 4 chunks and
-2.4 GB for 512 x 512 x 16, and with the default 1 GiB cache the former still stalled at 10 frames a
-second. With eight users animating large cubes at once it hid nothing and at 10 frames a second made
-more frames late, the storage and the decoders being busy already. So a prefetch belongs in the
-backend at a lower priority than reads someone is waiting for, sized against the cache, and the
-sweep's trade-off table gives the run size of each layout.
+carta-backend does not read ahead yet. carta-zarr's `Image::Prefetch` decodes the chunks a read would
+into the cache without reading the pixels out -- one element of each chunk, which decodes all of it --
+and the bench's `--animation-prefetch` uses it as a backend would: after the first frame of each run
+it prefetches the next, one at a time, and stops for the rest of the animation once a frame is late
+while a prefetch is under way. A frame that catches a prefetch waits for the decode already under way
+rather than starting another, since a cached chunk is not checked again (ADR 0015).
+
+For one user it hid every stall, at 5 and at 10 frames a second, in every case measured, including
+the 512 x 512 x 4 chunks with the default 1 GiB cache, which holds only 1.8 runs: a run is the plane's
+area times the chunk depth times four bytes, 589 MB for the 512 x 512 x 4 chunks and 2.4 GB for
+512 x 512 x 16. An earlier version that read the next run's first plane, 147 MB to allocate and fill,
+still stalled there at 10 frames a second.
+
+With eight users animating the same large cube on one machine, frames late out of 496 per setting,
+or 1008 for the 16-deep chunks:
+
+| Chunks, cache | fps | Without | With prefetch |
+|---|---|---|---|
+| 512 x 512 x 4, 1 GiB | 5 | 111 | 45 |
+| 512 x 512 x 4, 4 GiB | 5 | 112 | 35 |
+| 512 x 512 x 16, 8 GiB | 5 | 48 | 59 |
+| 512 x 512 x 4, 1 GiB | 10 | 141 | 159 |
+| 512 x 512 x 4, 4 GiB | 10 | 136 | 155 |
+| 512 x 512 x 16, 8 GiB | 10 | 203 | 343 |
+
+At CARTA's 5 frames a second it helped the 4-deep chunks and cut the longest stall of the 16-deep ones
+from 1.3 s to 1.2 s; at 10 it made things worse, because the one prefetch each animation made before
+stopping still decoded a whole run while the machine had no time over. Stopping on the second
+prefetch the animation caught up with, an earlier rule, was worse still: 541 late in the last row.
+So a backend that prefetches should do it only while the cache holds two runs for each cube being
+animated, and the sweep's trade-off table gives the run size of each layout.
 
 ### Use more file-reading threads on Lustre
 

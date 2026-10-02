@@ -21,7 +21,10 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 #include "support/check.h"
 
@@ -501,6 +504,69 @@ void TestAnOpenImageOutlivesTheWorkingDirectory(const char* fixture) {
             "an image opened relatively read different pixels");
 }
 
+// What a prefetch decoded, a read through the same pool finds without going to storage: after it the
+// chunks are emptied on disk, and the plane it covered still reads as it did, while the next plane,
+// which it did not cover, no longer reads at all. The fixture's flag is emptied too, so the plane
+// reading back masked shows that its chunks were decoded as well.
+void TestAPrefetchedPlaneIsReadFromThePool(const char* fixture) {
+    const auto copy = std::filesystem::temp_directory_path() / ("carta-zarr-prefetch-" + std::to_string(getpid()));
+    std::filesystem::remove_all(copy);
+    std::filesystem::copy(fixture, copy, std::filesystem::copy_options::recursive);
+    struct Remove {
+        std::filesystem::path path;
+        ~Remove() {
+            std::error_code ignored;
+            std::filesystem::remove_all(path, ignored);
+        }
+    } const remove{copy};
+
+    const auto plane = [](std::uint64_t frequency) {
+        carta::zarr::ReadRequest request;
+        request.axes = {{0, kL, 1}, {0, kM, 1}, {frequency, 1, 1}, {0, 1, 1}, {0, 1, 1}};
+        return request;
+    };
+    const auto open = [&] {
+        const auto context = carta::zarr::Context::Create();
+        Require(static_cast<bool>(context), "Context::Create failed");
+        const auto dataset = carta::zarr::Dataset::Open(context.value(), copy.string());
+        Require(static_cast<bool>(dataset), "Dataset::Open failed on the copy of the fixture");
+        const auto image = dataset->OpenImage("SKY");
+        Require(static_cast<bool>(image), "SKY could not be opened in the copy");
+        return std::make_pair(context.value(), image.value());
+    };
+    std::vector<float> reference(kL * kM, 0.0F);
+    Require(static_cast<bool>(open().second.Read(plane(0), {reference.data(), reference.size()})),
+            "the plane could not be read before anything was emptied");
+
+    const auto [context, sky] = open();
+    const auto pool = context.NewCachePool(std::size_t{64} << 20);
+    Require(static_cast<bool>(pool), "NewCachePool failed");
+    carta::zarr::ReadOptions options;
+    options.control.cache_pool = *pool;
+    const auto chunks = sky.Prefetch(plane(0), options);
+    Require(chunks && *chunks == kL / 2, "a prefetch of a plane did not say it decoded the plane's chunks" +
+                                             (chunks ? std::string{} : ": " + chunks.error().message));
+
+    for (const char* array : {"SKY", "FLAG"}) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(copy / array / "c")) {
+            if (entry.is_regular_file()) {
+                std::filesystem::resize_file(entry.path(), 0);
+            }
+        }
+    }
+
+    std::vector<float> pixels(kL * kM, 123.0F);
+    const auto read = sky.Read(plane(0), {pixels.data(), pixels.size()}, options);
+    Require(static_cast<bool>(read), "a prefetched plane went to storage for its chunks" +
+                                         (read ? std::string{} : ": " + read.error().message));
+    for (std::size_t i = 0; i < pixels.size(); ++i) {
+        Require((std::isnan(pixels.at(i)) && std::isnan(reference.at(i))) || pixels.at(i) == reference.at(i),
+                "a prefetched plane read back differently at offset " + std::to_string(i));
+    }
+    Require(!sky.Read(plane(1), {pixels.data(), pixels.size()}, options),
+            "a plane that was not prefetched still read from emptied chunks, so this shows nothing about the prefetch");
+}
+
 }  // namespace
 
 int main() {
@@ -525,6 +591,7 @@ int main() {
     }
     try {
         TestAnOpenImageOutlivesTheWorkingDirectory(kFixtures[0]);
+        TestAPrefetchedPlaneIsReadFromThePool(kFixtures[0]);
         Require(fast_axes.size() == 2 && fast_axes.at(0) != fast_axes.at(1),
                 "the two fixtures should disagree about which spatial axis the store varies fastest; "
                 "if they agree, one of them was regenerated wrongly and half of this is untested");
