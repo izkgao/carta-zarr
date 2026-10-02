@@ -19,12 +19,24 @@ separator chunk key encodings.
 `images/zarr/xradio/minimal` is the XRADIO v1.2 multi-image reference dataset used by the schema
 probe and descriptor tests. It carries shared coordinate, Stokes, storage, beam, mask, and
 consolidated-metadata examples. Its spectrum is intentionally nonuniform. `SKY` itself has no
-chunk files because all of its values equal the fill value, so pixel-read tests will need a fixture
-with non-fill data. `images/zarr/xradio/legacy` retains an earlier XRADIO layout to verify image
+chunk files, because all of its values equal the fill value; the pixel fixtures below are the ones
+with pixels to read. `images/zarr/xradio/uniform_beam` is the same dataset with one beam on every
+plane, which the backend reports as a single beam rather than one per plane.
+`images/zarr/xradio/legacy` retains an earlier XRADIO layout to verify image
 discovery and validation across the compatibility baseline. `images/zarr/xradio/time_axis` is the
 same dataset with two times rather than one: valid, and every image in it openable here, but not
 something CARTA displays, so the backend uses it to check that it does not list an image it would
 refuse to open. This library's own time > 1 case is a store its tests write.
+
+`images/zarr/xradio/pixels` is a small image whose every value spells its own logical coordinates,
+and whose axes all differ in length, so a read that permutes the axes wrongly gets either the wrong
+shape or the wrong values. One chunk is deleted and the flag marks a known pattern false, so the
+fill-value and pixel-mask paths have a definition to be checked against.
+`images/zarr/xradio/pixels_l_fastest` is the same image stored with `l` rather than `m` last, for a
+reader that decides anything from where an axis sits rather than from its name.
+`images/zarr/xradio/pixels_wide`, 512 x 520 x 4 x 2, is large enough for the reductions to divide a
+plane or a chunk between workers, which the small ones never are; it has no absent chunk and no
+flag, since the small ones cover those.
 
 These fixtures were moved from `carta-backend` (`test/data/`) and must keep the same layouts so the
 extracted library preserves the backend's compatibility baseline. zarr-python emits its expected

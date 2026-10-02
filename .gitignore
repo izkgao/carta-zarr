@@ -78,9 +78,9 @@ __pycache__/
 AGENTS.md
 CLAUDE.md
 
-# Working documents stay local. The ADRs, the design draft and the compatibility baseline are the
-# record a reader of this repository needs; the rest are research drafts, a measurement log and a
-# rendered atlas, none of them finished and none of them in the project's language.
+# Working documents stay local: research drafts, in a language other than the project's and no longer
+# kept in step with the code. What a reader of this repository needs is in the README, CONTEXT.md,
+# docs/storage-tuning.md and the ADRs.
 docs/archive/
 docs/read-api.md
 docs/sidecar.md

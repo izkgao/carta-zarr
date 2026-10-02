@@ -45,7 +45,7 @@ document, a seventh in freeing it again, an eighth in turning it into array meta
 cent in the read itself — so what the copy saves is a real fraction of a real cost rather than a
 rounding error. They are still under a
 millisecond either way, and that is not the reason to keep it: it is that each of those reads
-becomes one network round trip on the transport `design.md` §4 anticipates, which is what
+becomes one network round trip on a remote transport, which is what
 consolidated metadata was invented for.
 
 The seam is partial, and honestly so. Everything a probe needs is metadata, so a probe runs entirely
@@ -56,7 +56,7 @@ at all.
 
 Transport is a seam with two adapters, not one. The filesystem transport serves production; the
 in-memory transport in `tests/support/` serves the schema profile tests. A third — HTTP or S3 — is
-what `docs/design.md` §4 anticipates, and it arrives without the profile changing -- but not, as
+what a remote store would need, and it arrives without the profile changing -- but not, as
 first written here, without the library changing. See "Reopened" below.
 
 An in-memory transport makes hand-writing store metadata easy, which is in tension with ADR-0003's
