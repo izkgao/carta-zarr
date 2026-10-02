@@ -141,8 +141,8 @@ protected:
         // it was passed, which a sampled walk's report could never reach the end of.
         const auto rows = ChunksSampled(_plan.v_length, _plan.chunk_v, _plan.sample);
         const auto columns = ChunksSampled(_plan.u_length, _plan.chunk_u, _plan.sample);
-        for (std::size_t row = 0; row < rows.size();) {
-            const std::uint64_t band_rows = std::min<std::uint64_t>(_plan.band_rows, rows.size() - row);
+        for (std::uint64_t row = 0; row < rows.size();) {
+            const std::uint64_t band_rows = std::min(_plan.band_rows, rows.size() - row);
             SlabFootprint band;
             SampledRange(rows[row] * _plan.chunk_v,
                          std::min(_plan.v_length, (rows[row + band_rows - 1] + 1) * _plan.chunk_v), _plan.sample,
@@ -154,8 +154,8 @@ protected:
             // reads a run: band_rows floors at one, so without this the smallest read is a whole
             // chunk row, however many budgets wide that is.
             const std::uint64_t segment_chunks = _plan.UnitsAffordable(band_rows);
-            for (std::size_t column = 0; column < columns.size();) {
-                const std::uint64_t width = std::min<std::uint64_t>(segment_chunks, columns.size() - column);
+            for (std::uint64_t column = 0; column < columns.size();) {
+                const std::uint64_t width = std::min(segment_chunks, columns.size() - column);
                 SlabFootprint segment = band;
                 SampledRange(columns[column] * _plan.chunk_u,
                              std::min(_plan.u_length, (columns[column + width - 1] + 1) * _plan.chunk_u), _plan.sample,

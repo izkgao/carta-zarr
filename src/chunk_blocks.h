@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <vector>
 
 namespace carta::zarr::internal {
 
@@ -191,29 +190,37 @@ inline std::uint64_t ChunksTouched(std::uint64_t start, std::uint64_t count, std
 // The chunks along an axis of `length` elements that a sample of every `stride`th element from the
 // first has an element in, in order: the ones ChunksTouched counts, named. A whole-plane pass walks
 // these, so that a chunk the sample steps over is neither read nor counted.
-inline std::vector<std::uint64_t> ChunksSampled(std::uint64_t length, std::uint64_t chunk, std::uint64_t stride) {
-    std::vector<std::uint64_t> chunks;
-    if (length == 0) {
-        return chunks;
-    }
-    chunk = std::max<std::uint64_t>(1, chunk);
-    stride = std::max<std::uint64_t>(1, stride);
-    const std::uint64_t samples = ((length - 1) / stride) + 1;
-    if (stride < chunk) {
-        // No step is long enough to skip a chunk, so they are every chunk up to the last sample's.
-        const std::uint64_t last = ((samples - 1) * stride) / chunk;
-        chunks.reserve(static_cast<std::size_t>(last + 1));
-        for (std::uint64_t index = 0; index <= last; ++index) {
-            chunks.push_back(index);
+//
+// Worked out as they are asked for rather than listed, so that a walk asking for them allocates
+// nothing.
+class SampledChunks {
+public:
+    SampledChunks(std::uint64_t length, std::uint64_t chunk, std::uint64_t stride)
+        : _chunk(std::max<std::uint64_t>(1, chunk)), _stride(std::max<std::uint64_t>(1, stride)) {
+        if (length == 0) {
+            return;
         }
-        return chunks;
+        const std::uint64_t samples = ((length - 1) / _stride) + 1;
+        // Below a chunk no step is long enough to skip one, so they are every chunk up to the last
+        // sample's; otherwise every sample is in a chunk of its own.
+        _every = _stride < _chunk;
+        _size = _every ? (((samples - 1) * _stride) / _chunk) + 1 : samples;
     }
-    // Every sample is in a chunk of its own.
-    chunks.reserve(static_cast<std::size_t>(samples));
-    for (std::uint64_t sample = 0; sample < samples; ++sample) {
-        chunks.push_back((sample * stride) / chunk);
-    }
-    return chunks;
+
+    std::uint64_t size() const { return _size; }
+    bool empty() const { return _size == 0; }
+    // The index-th of them, for index < size().
+    std::uint64_t operator[](std::uint64_t index) const { return _every ? index : (index * _stride) / _chunk; }
+
+private:
+    std::uint64_t _chunk;
+    std::uint64_t _stride;
+    std::uint64_t _size = 0;
+    bool _every = true;
+};
+
+inline SampledChunks ChunksSampled(std::uint64_t length, std::uint64_t chunk, std::uint64_t stride) {
+    return SampledChunks(length, chunk, stride);
 }
 
 }  // namespace carta::zarr::internal

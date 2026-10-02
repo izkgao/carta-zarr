@@ -126,10 +126,18 @@ void TestASampleNamesTheChunksItTouches() {
     using carta::zarr::internal::ChunksSampled;
     using carta::zarr::internal::ChunksTouched;
     using Chunks = std::vector<std::uint64_t>;
-    Require(ChunksSampled(16, 4, 8) == Chunks{0, 2}, "every eighth of 16 in chunks of four is in chunks 0 and 2");
-    Require(ChunksSampled(10, 4, 3) == Chunks{0, 1, 2}, "every third of 10 steps over no chunk");
-    Require(ChunksSampled(13, 4, 1) == Chunks{0, 1, 2, 3}, "every element touches every chunk, the partial one too");
-    Require(ChunksSampled(13, 4, 5) == Chunks{0, 1, 2}, "0, 5 and 10 miss the partial chunk at 12");
+    const auto listed = [](std::uint64_t length, std::uint64_t chunk, std::uint64_t stride) {
+        const auto sampled = ChunksSampled(length, chunk, stride);
+        Chunks chunks;
+        for (std::uint64_t index = 0; index < sampled.size(); ++index) {
+            chunks.push_back(sampled[index]);
+        }
+        return chunks;
+    };
+    Require(listed(16, 4, 8) == Chunks{0, 2}, "every eighth of 16 in chunks of four is in chunks 0 and 2");
+    Require(listed(10, 4, 3) == Chunks{0, 1, 2}, "every third of 10 steps over no chunk");
+    Require(listed(13, 4, 1) == Chunks{0, 1, 2, 3}, "every element touches every chunk, the partial one too");
+    Require(listed(13, 4, 5) == Chunks{0, 1, 2}, "0, 5 and 10 miss the partial chunk at 12");
     Require(ChunksSampled(0, 4, 1).empty(), "an axis of nothing touches nothing");
     for (std::uint64_t length = 1; length <= 40; ++length) {
         for (std::uint64_t chunk = 1; chunk <= 9; ++chunk) {
