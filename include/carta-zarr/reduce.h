@@ -282,10 +282,15 @@ struct CubeHistogramRequest {
     PlaneSelection planes;
     // The bins the caller wants back.
     std::uint32_t bins = 0;
-    // The resolution the walk bins at. Zero takes the library's default, which is sixteen times the
-    // bins asked for; larger is more faithful and costs eight bytes a bin. Held between 4,096 and
-    // 65,536 either way, and rounded up to a power of two so that merging in pairs leaves nothing
-    // behind.
+    // The resolution the walk bins at: how many bins each of its provisional histograms holds before
+    // they are re-aggregated onto `bins`. Larger is more faithful and costs eight bytes a bin for
+    // every task the walk is split into.
+    //
+    // Zero takes the library's default, which is sixteen times the bins asked for, held between
+    // 4,096 and 65,536 -- the range where tuning.h measured the error and the time to flatten out. A
+    // value stated here is taken as given, up to kMaxHistogramBins, so a caller can ask for coarser
+    // than the default as well as finer. Either way it is rounded up to a power of two, and to at
+    // least two, so that merging in pairs leaves nothing behind.
     std::uint32_t provisional_bins = 0;
     // Take every nth pixel along both spatial axes. One reads every pixel.
     //
