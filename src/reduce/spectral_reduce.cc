@@ -9,7 +9,6 @@
 #include "chunk_blocks.h"
 #include "axis_map.h"
 #include "reduce/tuning.h"
-#include "reduce/block_emit.h"
 #include "reduce/occupancy.h"
 #include "reduce/pass.h"
 #include "reduce/plane_selection.h"
@@ -168,44 +167,40 @@ Result<void> ReduceSpectral(const ReducibleImage& image, const SpectralReduceReq
     // the region's own area would let a cursor-sized request pull an unbounded amount through. That
     // is the plan's rule as much as it is this one's, which is why the plan holds it.
 
-    // The chunks one spectral layer of the whole region set occupies. Not the plan's layer, which
-    // is the whole plane: a reduction spends its emit budget against the region set it was given.
-    const std::uint64_t layer_chunks = occupancy.LayerChunks();
-
-    // How many channels one emitted block may hold. The hint is the caller's, the budgets are the
-    // library's and the chunk alignment is the walk's; the smallest wins, and the block reports
-    // what it used.
+    // The pass walks the footprints, and counts a block's progress in the chunks they occupy
+    // together. Not the plan's layer, which is the whole plane: a reduction spends its emit budget
+    // against the region set it was given.
+    //
+    // How many channels one emitted block may hold is the pass's to work out. The hint is the
+    // caller's, the budgets are the library's and the chunk alignment is the walk's; the smallest
+    // wins, and the block reports what it used.
     //
     // Without a hint a block costs one budget of decoded bytes, the same invariant a piece of Read
     // carries, which is why it is free: the block spends whatever the spatial walk left over. A
     // small region leaves almost all of it, so the block spans many chunks along the spectrum. A
-    // region covering the image spends the budget spatially, `spectral_chunks` below collapses to
-    // one, and the block becomes the single chunk layer the walk is already reading -- the results
-    // are handed over a layer at a time because that is when they are finished, not sooner.
+    // region covering the image spends the budget spatially, what is left affords one chunk along
+    // the spectrum, and the block becomes the single chunk layer the walk is already reading -- the
+    // results are handed over a layer at a time because that is when they are finished, not sooner.
     //
     // Emitting only at the end instead, which is what a zero used to mean, is silent for as long as
     // the whole reduction takes. One layer of a 7763x4742 image is 160 MiB and 70 ms; a thousand
     // channels of it is a minute of work with no partial answer and nowhere to cancel.
-    const BlockEmitter emitter(plan, layer_chunks, layout.BytesPerChannel(request.regions.size),
-                               request.emit_every_channels,
-                               "The spectral reduction was cancelled by its sink");
+    auto pass = PassOverFootprints(source, plan, options, footprints, "The spectral reduction was cancelled by its sink");
 
     StatisticSlots accumulator;
     // One private accumulator per task, reused across slabs. See the dispatch below. "Partials" as
     // in the plane histogram, and deliberately not "sinks": a sink in this library is where a
     // finished block goes, and this one is named in the same function as the caller's SpectralSink.
     std::vector<StatisticSlots> partials;
-    SlabWalk walk(source, plan, options);
 
     const auto reset_block = [&](std::uint64_t length) { accumulator.Reset(layout, request.regions.size, length); };
 
     // One read's worth of pixels, accumulated into the block's own totals.
     //
     // Named rather than written into the call below, for the reason plane_histogram.cc gives for
-    // bin_slab: a visitor nested inside the walk inside the emitter is three lambdas deep before the
-    // first loop, and this one carries a fourth inside it.
+    // bin_slab, and this one carries another lambda inside it.
     //
-    // The footprint's bounds arrive as an argument and are unpacked into the names the body already
+    // The pass hands it the footprint each slab was read over. Its bounds arrive as an argument and are unpacked into the names the body already
     // used, so that the accumulation is the same text it has been since it stopped doing its own
     // reading. It stays a lambda passed as a template parameter, never a std::function: the
     // per-pixel loop inlines through it. ADR 0005.
@@ -369,21 +364,6 @@ Result<void> ReduceSpectral(const ReducibleImage& image, const SpectralReduceReq
         accumulator.MergeInOrder(partials.data(), tasks, slab.first_channel.index);
     };
 
-    // Every footprint the regions occupy, as the occupancy cut them. Two footprints of the same block
-    // share `reads_done`, so a block taken in a single read still reports once -- at the end, through
-    // the emitter.
-    const auto walk_block = [&](EmitBlock& block, const auto& report) -> Result<void> {
-        for (const auto& footprint : footprints) {
-            const auto walked =
-                walk.Over(footprint.slab, block.begin, block.end, block.reads_done, block.chunks_done, report,
-                          [&](const Slab& slab) { accumulate_slab(footprint, slab); });
-            if (!walked) {
-                return walked.error();
-            }
-        }
-        return {};
-    };
-
     // Out of the type and into the public block, which is the one place it happens.
     const auto hand_over = [&](SelectionChannel first_channel, [[maybe_unused]] std::uint64_t length, bool complete,
                                double completeness) {
@@ -391,7 +371,8 @@ Result<void> ReduceSpectral(const ReducibleImage& image, const SpectralReduceReq
         return accumulator.HandOver(first_channel.index, complete, completeness, sink);
     };
 
-    return emitter.Over(reset_block, walk_block, hand_over);
+    return pass.InBlocks(layout.BytesPerChannel(request.regions.size), request.emit_every_channels, reset_block,
+                         accumulate_slab, hand_over);
 }
 
 }  // namespace carta::zarr::internal
