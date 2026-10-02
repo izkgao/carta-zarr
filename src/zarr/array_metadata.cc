@@ -30,6 +30,15 @@ const nlohmann::json* FindCodec(const nlohmann::json* codecs, std::string_view n
     return nullptr;
 }
 
+// Whether every codec in a chain that names itself does so with a string. FindCodec matches codecs
+// by name, and a name of any other type throws out of that lookup rather than failing to match --
+// so a chain is held to this before anything looks a codec up in it.
+bool CodecNamesAreStrings(const nlohmann::json& codecs) {
+    return std::all_of(codecs.begin(), codecs.end(), [](const auto& codec) {
+        return !codec.is_object() || !codec.contains("name") || codec.at("name").is_string();
+    });
+}
+
 // Return the bytes-to-bytes compressor in a codec chain, or an empty string when the chain stores
 // raw bytes. Checksum and array-to-bytes codecs are not compressors and are ignored here.
 std::string FindCompressor(const nlohmann::json* codecs) {
@@ -236,6 +245,9 @@ Result<ArrayMetadata> ParseArrayMetadata(const nlohmann::json& metadata, std::st
 
     if (metadata.contains("codecs") && metadata.at("codecs").is_array()) {
         result.codecs = metadata.at("codecs");
+        if (!CodecNamesAreStrings(result.codecs)) {
+            return Error{ErrorCode::invalid_metadata, "Zarr codec names must be strings", node_path};
+        }
     }
     if (metadata.contains("chunk_key_encoding") && metadata.at("chunk_key_encoding").is_object()) {
         result.chunk_key_encoding = metadata.at("chunk_key_encoding");
@@ -277,6 +289,11 @@ Result<ArrayMetadata> ParseArrayMetadata(const nlohmann::json& metadata, std::st
             !std::all_of(inner->begin(), inner->end(), IsPositiveInteger)) {
             return Error{ErrorCode::invalid_metadata,
                          "Sharding codec chunk_shape must be positive and match the array rank", node_path};
+        }
+        const auto& configuration = sharding->at("configuration");
+        if (configuration.contains("codecs") && configuration.at("codecs").is_array() &&
+            !CodecNamesAreStrings(configuration.at("codecs"))) {
+            return Error{ErrorCode::invalid_metadata, "Zarr codec names must be strings", node_path};
         }
     }
     return result;

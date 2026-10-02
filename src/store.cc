@@ -200,7 +200,9 @@ Result<Store> OpenStore(TransportPtr transport, StoreContextPtr context) {
 
     std::map<std::string, nlohmann::json> consolidated;
     bool has_consolidated = false;
-    if (metadata.contains("consolidated_metadata")) {
+    // Null is no consolidation, as zarr-python reads it: the hierarchy is listed, as it is for a
+    // root without the member at all.
+    if (metadata.contains("consolidated_metadata") && !metadata.at("consolidated_metadata").is_null()) {
         auto& block = metadata.at("consolidated_metadata");
         if (!block.is_object() || !block.contains("metadata") || !block.at("metadata").is_object()) {
             return Error{ErrorCode::invalid_metadata,

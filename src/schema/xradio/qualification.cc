@@ -7,6 +7,7 @@
 #include "qualification.h"
 
 #include "../../zarr/array_metadata.h"
+#include "attributes.h"
 #include "flag.h"
 
 #include <algorithm>
@@ -50,6 +51,31 @@ std::optional<Diagnostic> DisagreementWithCoordinates(const Store& store,
                               "Image dimension '" + name + "' is not the length of the coordinate of that name",
                               std::string(node)};
         }
+    }
+    return std::nullopt;
+}
+
+// Why the flag an image declares cannot mask it, or nothing when it declares none or one that can.
+// What DetermineFlag refuses an image over, asked of the listing so that the two agree; with nothing
+// declared there is no refusal to agree with, because an image with no usable candidate opens
+// unmasked.
+std::optional<Diagnostic> UnusableDeclaredFlag(const Store& store, const zarr_metadata::ArrayMetadata& image,
+                                               std::string_view node) {
+    const auto declared = AttributeString(image.attributes, "flag");
+    if (declared.empty()) {
+        return std::nullopt;
+    }
+    const auto refused = [&](const Error& error) {
+        return Diagnostic{DiagnosticCode::invalid_metadata,
+                          "Declared flag '" + declared + "' cannot mask this image: " + error.message,
+                          std::string(node)};
+    };
+    const auto& flag = store.ReadArrayMetadata(declared);
+    if (!flag) {
+        return refused(flag.error());
+    }
+    if (auto usable = RequireUsableFlag(flag.value(), image, declared); !usable) {
+        return refused(usable.error());
     }
     return std::nullopt;
 }
@@ -98,8 +124,23 @@ NodeQualification QualifyNode(const Store& store, const NodeEntry& entry) {
                                                 "Complex sky-plane variables are not openable", std::string(node)},
                                      false};
         }
+        // The five axes are the whole of what an image is described by, so a sixth would be read with
+        // a selection one rank short -- every read refused, from an image listed as openable.
+        if (array.dimension_names.size() != kSkyAxes.size()) {
+            return NodeQualification{true, false,
+                                     Diagnostic{DiagnosticCode::invalid_metadata,
+                                                "Sky-plane variable has dimensions beyond time, frequency, "
+                                                "polarization, l and m",
+                                                std::string(node)},
+                                     true};
+        }
         if (auto disagreement = DisagreementWithCoordinates(store, array, node); disagreement) {
             return NodeQualification{true, false, std::move(disagreement), true};
+        }
+        // A declared flag binds the image to it -- DetermineFlag closes one whose flag cannot mask it --
+        // so the listing has to say so too, or it offers an image that will not open.
+        if (auto unusable = UnusableDeclaredFlag(store, array, node); unusable) {
+            return NodeQualification{true, false, std::move(unusable), true};
         }
         return NodeQualification{true, true, std::nullopt, false};
     }

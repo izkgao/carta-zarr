@@ -31,6 +31,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -718,6 +719,31 @@ void TestANodeThatWillNotParseIsDiagnosedNotRefused() {
     Require(size && size.value().bytes == 592, "an unparseable node left the dataset without a declared size");
 }
 
+// The dataset-level half of a codec that will not parse: the array is diagnosed, and the dataset
+// beside it is not. A numeric codec name used to throw past every per-node diagnostic and close the
+// store.
+void TestAnArrayWithAMalformedCodecIsDiagnosedNotRefused() {
+    auto nodes = CompleteStore();
+    nodes["JUNK"] = R"({"shape":[2],"data_type":"float32",)"
+                    R"("chunk_grid":{"name":"regular","configuration":{"chunk_shape":[2]}},)"
+                    R"("codecs":[{"name":"bytes"},{"name":17}],"zarr_format":3,"node_type":"array"})";
+
+    Require(Probe(nodes).kind == SchemaMatchKind::match, "a malformed codec refused a store whose image is fine");
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "the store holding a malformed codec failed to open");
+    const auto discovery = XradioProfile().Discover(store.value());
+    Require(static_cast<bool>(discovery), "discovery refused a store holding a malformed codec");
+    Require(OpenableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
+            "the image beside a malformed codec was not openable");
+    const auto& said = discovery.value().diagnostics;
+    Require(std::any_of(said.begin(), said.end(),
+                        [](const auto& diagnostic) {
+                            return diagnostic.node_path == "JUNK" &&
+                                   diagnostic.code == carta::zarr::DiagnosticCode::unreadable_array;
+                        }),
+            "the array with a malformed codec was not diagnosed as unreadable");
+}
+
 // The report latches: once a requirement is unmet, later ones are no-ops. A store with two faults
 // is therefore diagnosed once, by the first fault reached -- the behaviour a probe had when every
 // check returned early, now stated somewhere rather than emerging from the control flow.
@@ -776,6 +802,73 @@ void TestADeclaredFlagIsBinding() {
     Require(!missing, "an image declaring a flag variable that does not exist was opened");
 }
 
+// The listing's half of the same rule. An image whose declared flag cannot mask it is closed when it
+// is opened, so it has to be closed when it is listed too: it was listed openable and chosen as the
+// default, and a consumer offered an image it could not open.
+void TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing() {
+    const std::string sky_dimensions = R"(["time","frequency","polarization","l","m"])";
+    const auto listing = [&](const std::string& flag_node) {
+        auto nodes = CompleteStore();
+        nodes["SKY"] = SkyArray("float32", R"({"units":"Jy/beam","flag":"MASK_0"})");
+        nodes["MODEL"] = SkyArray();
+        if (!flag_node.empty()) {
+            nodes["MASK_0"] = flag_node;
+        }
+        auto store = Open(nodes);
+        Require(static_cast<bool>(store), "the declared-flag listing store did not open");
+        const auto profile = XradioProfile();
+        auto discovery = profile.Discover(store.value());
+        Require(static_cast<bool>(discovery), "discovery failed on the declared-flag listing store");
+        return std::make_pair(discovery.value(), profile.Describe(store.value(), "SKY"));
+    };
+
+    const auto usable = listing(NumericArray("[1,3,2,4,5]", sky_dimensions, "bool", R"({"type":"flag"})"));
+    Require(OpenableImageIds(usable.first.images) == std::vector<std::string>{"SKY", "MODEL"},
+            "an image whose declared flag can mask it was not listed openable");
+
+    const std::vector<std::pair<std::string, std::string>> unusable{
+        {"", "a declared flag that does not exist"},
+        {NumericArray("[1,3,2,4,4]", sky_dimensions, "bool", R"({"type":"flag"})"), "a flag of another shape"},
+        {NumericArray("[1,3,2,4,5]", sky_dimensions, "uint8", R"({"type":"flag"})"), "a flag that is not boolean"},
+    };
+    for (const auto& [flag_node, what] : unusable) {
+        const auto [discovery, sky] = listing(flag_node);
+        Require(ImageIds(discovery.images) == std::vector<std::string>{"SKY", "MODEL"},
+                "an image with " + what + " was dropped from the listing rather than listed with its reason");
+        Require(OpenableImageIds(discovery.images) == std::vector<std::string>{"MODEL"},
+                "an image with " + what + " was listed openable");
+        Require(discovery.default_image_id == "MODEL", "an image with " + what + " was chosen as the default");
+        Require(HasDiagnostic(discovery.images.front().diagnostics, carta::zarr::DiagnosticCode::invalid_metadata),
+                "an image with " + what + " was listed without saying why it will not open");
+        Require(!sky && sky.error().code == ErrorCode::invalid_metadata,
+                "describing an image with " + what + " was not refused as invalid metadata");
+    }
+}
+
+// An image is described by the five axes this profile knows. One with a sixth used to be listed
+// openable and described with five, so every read of it failed on the rank it had not been told.
+void TestAnImageWithAnAxisBeyondTheFiveIsNotOpenable() {
+    auto nodes = CompleteStore();
+    nodes["MODEL"] = NumericArray("[1,3,2,4,5,1]", R"(["time","frequency","polarization","l","m","extra"])",
+                                  "float32", R"({"units":"Jy/beam"})");
+
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "the extra-axis store failed to open");
+    const auto profile = XradioProfile();
+    const auto discovery = profile.Discover(store.value());
+    Require(static_cast<bool>(discovery), "discovery failed on the extra-axis store");
+    Require(ImageIds(discovery.value().images) == std::vector<std::string>{"SKY", "MODEL"},
+            "the extra-axis image was dropped from the listing rather than listed with its reason");
+    Require(OpenableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
+            "an image with an axis this profile cannot describe was listed openable");
+    Require(HasDiagnostic(discovery.value().images.back().diagnostics, carta::zarr::DiagnosticCode::invalid_metadata),
+            "the extra-axis image was listed without saying why it will not open");
+
+    const auto model = profile.Describe(store.value(), "MODEL");
+    Require(!model && model.error().code == ErrorCode::invalid_metadata,
+            "an image with an axis this profile cannot describe was not refused as invalid metadata");
+}
+
 // With nothing declared the store is inspected instead, and a store offering two equally good
 // candidates is refused rather than guessed at. The refusal is a diagnostic on the image: the image
 // is still readable, just unmasked.
@@ -807,6 +900,24 @@ void TestAmbiguousFlagsSelectNone() {
     auto only = DetermineFlag(single.value(), single_image.value(), "SKY", single_diagnostics);
     Require(static_cast<bool>(only) && only.value() == "FLAG_1", "one matching flag was not selected");
     Require(single_diagnostics.empty(), "one matching flag produced an ambiguity diagnostic");
+}
+
+// A root that says its consolidated metadata is null has none, which is how zarr-python reads it: it
+// opens the hierarchy by listing, as a root without the member would. It used to be refused as a
+// malformed block, closing a store whose every node was fine.
+void TestANullConsolidatedBlockIsNoConsolidation() {
+    auto nodes = CompleteStore();
+    auto root = RootGroup();
+    root.insert(root.size() - 1, ",\"consolidated_metadata\":null");
+    nodes[""] = root;
+
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "a root with null consolidated metadata was refused");
+    Require(Probe(nodes).kind == SchemaMatchKind::match, "a store with null consolidated metadata was not matched");
+    const auto discovery = XradioProfile().Discover(store.value());
+    Require(static_cast<bool>(discovery) &&
+                OpenableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
+            "the image of a store with null consolidated metadata was not found by listing");
 }
 
 void TestStoreRejections() {
@@ -965,9 +1076,13 @@ int main() {
         TestAConsolidatedBlockThatMisnamesItsNodesIsRefused();
         TestTheInventorySaysWhatEachNodeIs();
         TestANodeThatWillNotParseIsDiagnosedNotRefused();
+        TestAnArrayWithAMalformedCodecIsDiagnosedNotRefused();
         TestADeclaredFlagIsBinding();
+        TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing();
+        TestAnImageWithAnAxisBeyondTheFiveIsNotOpenable();
         TestAmbiguousFlagsSelectNone();
         TestStoreRejections();
+        TestANullConsolidatedBlockIsNoConsolidation();
         TestSizeFallsBackWhenTheStoreCannotBeMeasured();
         TestSizeRefusesAStoreWithNoArrays();
         TestADescriptionIsBuiltFromTheValuesItIsGiven();
