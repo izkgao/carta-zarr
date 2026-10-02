@@ -200,6 +200,14 @@ void TestALayerIsCountedInWholeChunks() {
     // An axis that does not divide by its chunk still counts the partial chunk.
     const auto ragged = Plan(MakeImage(513, 520, 32), geometry, Range{0, 32, 1}, ReadOptions{});
     Require(ragged.layer_chunks == 6, "513 pixels over a 256-wide chunk is three, not two");
+
+    // Sampled, a layer is the chunks the sample has a pixel in. Every sixteenth pixel of a 64-pixel
+    // axis in chunks of 8 falls in chunks 0, 2, 4 and 6, and of a 16-pixel one in chunk 0 alone: four
+    // of the sixteen there are.
+    const auto sampled = Plan(MakeImage(16, 64, 1), MakeGeometry(8, 8, 1, AxisRole::spatial_y), Range{0, 1, 1},
+                              ReadOptions{}, 16);
+    Require(sampled.layer_chunks == 4, "a sampled layer of " + std::to_string(sampled.layer_chunks) +
+                                           " chunks, not the four the sample reads");
 }
 
 // A budget below one chunk row does not produce a band of zero rows, which would read nothing and
@@ -464,8 +472,8 @@ void TestAChunkRowWiderThanTheBudgetIsSplitAlongIt() {
     Require(source.chunks_touched() == 2ULL * 8ULL * 2ULL, "over every chunk of it");
 }
 
-// Sampling steps over pixels, and a piece of a row it steps over entirely is not read at all -- but
-// still counted, so that progress reaches the whole.
+// Sampling steps over pixels, and a chunk it steps over entirely is neither read nor counted: what a
+// pass is a fraction of is the chunks it decodes.
 void TestASampledRowSplitsAlongItToo() {
     const auto image = MakeImage(16, 64, 1);
     const auto geometry = MakeGeometry(8, 8, 1, AxisRole::spatial_y);
@@ -487,12 +495,12 @@ void TestASampledRowSplitsAlongItToo() {
     // u = 0, 16, 32, 48 and v = 0: one pixel in every other chunk along the row.
     Require(walked.pixels == 4, "every sixteenth pixel each way");
     Require(source.pixel_reads() == 4, "and only the pieces holding one are read");
-    // Sixteen chunks to the plane: the row of eight read in pieces, every other one stepped over,
-    // and the second row stepped over whole. Each read after the first is told what came before it,
-    // the pieces stepped over included -- and the second row, counted after the last read, is never
-    // told at all.
-    Require(reported == std::vector<double>{2.0 / 16, 4.0 / 16, 6.0 / 16},
-            "the pieces stepped over were not counted as they were passed");
+    // Sixteen chunks to the plane, and four the sample has a pixel in: every other one of the first
+    // row of eight, and none of the second. Each read after the first is told the chunks before it of
+    // those four. Counting the chunks stepped over as well, as this used to, told it 2/16, 4/16 and
+    // 6/16 and never reached the whole: the last eight were passed after the last read.
+    Require(reported == std::vector<double>{1.0 / 4, 2.0 / 4, 3.0 / 4},
+            "the fractions were not of the chunks the sample reads");
 }
 
 // ---------------------------------------------------------------------------------------------
