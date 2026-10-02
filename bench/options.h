@@ -38,7 +38,7 @@ enum class Mode {
     region,          // ReduceSpectral over a box covering 5% of the plane
     cube_histogram,  // ComputeCubeHistogram over this process's share of the channels
     open,            // Context::Create, Dataset::Open and OpenImage, with nothing cached
-    animation,       // consecutive planes from a random channel, through the context's shared cache
+    animation,       // consecutive planes from a random channel at a frame rate, through the shared cache
 };
 
 const char* ModeName(Mode mode) noexcept;
@@ -90,6 +90,12 @@ struct RunOptions {
     double region_fraction = 0.05;
     // The planes one animation operation reads, one after another.
     unsigned animation_frames = 32;
+    // Frames a second an animation is played at, each frame read no earlier than its turn; 0 reads
+    // them back to back. CARTA's animator plays at 5 unless the user changes it.
+    double animation_fps = 5.0;
+    // Whether an animation reads the next run of chunks along the spectrum in the background as soon
+    // as it enters one, as a backend that prefetched would.
+    bool animation_prefetch = false;
     HistogramMethod histogram;
     std::uint64_t seed = 1;
     ContextOptions context;

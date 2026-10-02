@@ -245,6 +245,7 @@ std::string Describe(const Error& error) {
         MarkSharedChunks(plans, *axes, image->chunk_geometry().chunk_shape);
         plan = std::move(plans[process_index]);
         runner.emplace(*context, std::move(image).value(), options.histogram, options.FirstTouchCacheBytes());
+        runner->SetAnimation(options.animation_fps, options.animation_prefetch);
     }
 
     send(kReady);
@@ -310,6 +311,13 @@ std::string Describe(const Error& error) {
             result.elements = *elements;
             result.logical_bytes = *elements * item_size;
             result.checksum = runner->Fingerprint();
+            if (const auto& frames = runner->frame_stats()) {
+                result.frame_first_s = frames->first_s;
+                result.frame_median_s = frames->median_s;
+                result.frame_max_s = frames->max_s;
+                result.late_frames = frames->late;
+                result.late_max_s = frames->late_max_s;
+            }
         } else {
             const bool expired = elements.error().code == ErrorCode::cancelled && end >= deadline;
             result.status = expired ? "timeout" : "error";

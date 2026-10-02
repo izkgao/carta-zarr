@@ -108,6 +108,25 @@ deep, close to 256 x 256 x 16, and a 512-square, 4096-channel one at about 126, 
 512 x 512 x 4. Put the chunk shapes a site already uses into its sweep's grid, so that the report
 compares every candidate against them.
 
+### Animations stall where a run of chunks begins
+
+An animation reads plane after plane through the backend's cache. Within a run of chunks along the
+spectrum every frame after the first finds its chunks decoded and costs a few milliseconds; the frame
+that enters the next run reads and decodes all of it, which costs what jumping to a channel does. At
+CARTA's 5 frames a second, a 7763 x 4742 cube in 512 x 512 x 4 chunks stalled for up to 135 ms every
+fourth frame for one user, and in 512 x 512 x 16 chunks for up to 400 ms every sixteenth; 512-square
+cubes barely stalled at all.
+
+carta-backend does not read ahead. One that did -- starting a read of the next run in the background
+as soon as an animation enters one -- was simulated with `--animation-prefetch`, and for one user it
+hid every stall, at 5 and at 10 frames a second, on condition that the cache held two runs: a run is
+the plane's area times the chunk depth times four bytes, 589 MB for the 512 x 512 x 4 chunks and
+2.4 GB for 512 x 512 x 16, and with the default 1 GiB cache the former still stalled at 10 frames a
+second. With eight users animating large cubes at once it hid nothing and at 10 frames a second made
+more frames late, the storage and the decoders being busy already. So a prefetch belongs in the
+backend at a lower priority than reads someone is waiting for, sized against the cache, and the
+sweep's trade-off table gives the run size of each layout.
+
 ### Use more file-reading threads on Lustre
 
 `--zarr_file_io_threads 8` was better than the default of 2 on Lustre in every sweep: a plane of the

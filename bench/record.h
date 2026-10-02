@@ -25,7 +25,7 @@
 
 namespace carta::zarr::bench {
 
-inline constexpr int kCsvVersion = 4;
+inline constexpr int kCsvVersion = 5;
 
 // What a dataset's bench-manifest.json says, for the columns the library cannot answer. Empty for a
 // dataset the generator did not write, which the bench reads as well as any other.
@@ -72,6 +72,8 @@ struct Row {
     std::string region_fraction;
     std::string histogram_method;
     std::string animation_frames;
+    std::string animation_fps;
+    std::string animation_prefetch;
     long long trial_timeout_s = 0;
     std::string cold_method;
     bool cold_ok = false;
@@ -95,6 +97,12 @@ struct Row {
     std::optional<double> sys_cpu_s;
     std::optional<std::uint64_t> peak_rss_bytes;
     std::optional<std::uint64_t> checksum;
+    // An animation's frames after the first, and the first on its own. See FrameStats.
+    std::optional<double> frame_first_s;
+    std::optional<double> frame_median_s;
+    std::optional<double> frame_max_s;
+    std::optional<unsigned> late_frames;
+    std::optional<double> late_max_s;
 };
 
 // The settings columns of a row, from the options and the dataset: everything a row says before

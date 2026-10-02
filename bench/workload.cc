@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -362,6 +364,10 @@ Runner::Runner(const Context& context, Image image, HistogramMethod histogram, s
         _axes = *axes;
         // Sized here so that no operation pays for growing it.
         _pixels.resize(std::max(_axes->width * _axes->height, _axes->channels));
+        const auto& chunk = _image->chunk_geometry().chunk_shape;
+        if (_axes->spectral < chunk.size()) {
+            _spectral_chunk = std::max<std::uint64_t>(chunk[_axes->spectral], 1);
+        }
         _exact.reserve(_axes->channels * 4);
     }
 }
@@ -386,6 +392,7 @@ Result<void> Runner::Prepare(const Operation& operation) {
 Result<std::uint64_t> Runner::Run(const Operation& operation, const ReadOptions& options) {
     _pixel_count = 0;
     _frames.reset();
+    _frame_stats.reset();
     _exact.clear();
     _counts.clear();
     if (operation.mode == Mode::open) {
@@ -417,20 +424,95 @@ Result<std::uint64_t> Runner::Run(const Operation& operation, const ReadOptions&
 
 // Plane after plane, as carta-backend serves a playing animation: each frame its own read, through
 // the context's cache, so that a frame finds what the one before it decoded when they share chunks.
+//
+// Played at a frame rate, a frame is read no earlier than its turn and is late if it is not ready by
+// the end of it; a frame that runs over pushes the ones after it back, as a viewer waiting on it would
+// see. With prefetch, entering a run of chunks along the spectrum starts a read of the first plane of
+// the next run on a thread of its own, which decodes that run's chunks into the cache while this run's
+// frames play from it.
 Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOptions& options) {
+    using Clock = std::chrono::steady_clock;
     std::uint64_t hash = kFnvOffset;
     std::uint64_t elements = 0;
     Operation frame = operation;
     frame.mode = Mode::plane;
+    const auto& axes = *_axes;
+    const auto period = _fps > 0.0 ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / _fps))
+                                   : Clock::duration::zero();
+    if (_prefetch && _prefetched.size() < axes.width * axes.height) {
+        _prefetched.resize(axes.width * axes.height);
+    }
+    std::thread prefetcher;
+    const auto prefetch = [&](std::uint64_t channel) {
+        if (prefetcher.joinable()) {
+            prefetcher.join();
+        }
+        prefetcher = std::thread([this, &axes, channel, polarization = operation.polarization, options] {
+            ReadRequest request;
+            request.axes.assign(axes.rank, Range{0, 1, 1});
+            request.axes[axes.x] = Range{0, axes.width, 1};
+            request.axes[axes.y] = Range{0, axes.height, 1};
+            request.axes[axes.spectral] = Range{channel, 1, 1};
+            if (axes.polarization) {
+                request.axes[*axes.polarization] = Range{polarization, 1, 1};
+            }
+            (void)_image->Read(request, {_prefetched.data(), axes.width * axes.height}, options);
+        });
+    };
+
+    FrameStats stats;
+    std::vector<double> reads;
+    const auto start = Clock::now();
+    auto turn = start;
     for (std::uint64_t index = 0; index < operation.channel_count; ++index) {
         frame.channel = operation.channel + index;
+        if (_prefetch && _spectral_chunk > 1 && (index == 0 || frame.channel % _spectral_chunk == 0)) {
+            const auto next = (frame.channel / _spectral_chunk + 1) * _spectral_chunk;
+            if (next < operation.channel + operation.channel_count) {
+                prefetch(next);
+            }
+        }
+        if (period > Clock::duration::zero()) {
+            std::this_thread::sleep_until(turn);
+        }
+        const auto began = Clock::now();
         auto read = Read(frame, options);
+        const auto done = Clock::now();
         if (!read) {
+            if (prefetcher.joinable()) {
+                prefetcher.join();
+            }
             return read;
         }
         elements += *read;
-        Mix(hash, bench::Fingerprint(_pixels.data(), _pixel_count), sizeof(hash));
+        // Played at a frame rate, only the last frame is fingerprinted: a plane of a large cube takes
+        // longer to hash than a frame's turn, and hashing every one would make every frame late.
+        if (period == Clock::duration::zero() || index + 1 == operation.channel_count) {
+            Mix(hash, bench::Fingerprint(_pixels.data(), _pixel_count), sizeof(hash));
+        }
+
+        const double seconds = std::chrono::duration<double>(done - began).count();
+        if (index == 0) {
+            stats.first_s = seconds;
+        } else {
+            reads.push_back(seconds);
+            if (period > Clock::duration::zero() && done > turn + period) {
+                ++stats.late;
+                stats.late_max_s = std::max(stats.late_max_s, std::chrono::duration<double>(done - turn - period).count());
+            }
+        }
+        // The next frame's turn follows this one's, or this frame's end when it ran over.
+        turn = std::max(turn + period, done);
     }
+    if (prefetcher.joinable()) {
+        prefetcher.join();
+    }
+    if (!reads.empty()) {
+        std::sort(reads.begin(), reads.end());
+        stats.median_s = reads[reads.size() / 2];
+        stats.max_s = reads.back();
+    }
+    _frame_stats = stats;
     _pixel_count = 0;
     _frames = hash;
     return elements;

@@ -126,6 +126,11 @@ void TestTheCommandLine() {
     Require(defaults.dataset == "cube.zarr" && defaults.modes.size() == 6, "run does not default to every mode");
     Require(defaults.OpsFor(Mode::animation) == 2 && defaults.animation_frames == 32,
             "an animation does not default to two runs of 32 frames");
+    Require(defaults.animation_fps == 5.0 && !defaults.animation_prefetch,
+            "an animation does not default to CARTA's 5 frames a second without prefetch");
+    const auto played = Get<RunOptions>(Parse({"run", "cube.zarr", "--animation-fps", "0", "--animation-prefetch"}));
+    Require(played.animation_fps == 0.0 && played.animation_prefetch, "--animation-fps or --animation-prefetch was lost");
+    Require(Get<Usage>(Parse({"run", "cube.zarr", "--animation-fps", "-1"})).error, "a negative frame rate was accepted");
     Require(defaults.FirstTouchCacheBytes() == std::size_t{1} << 30,
             "a first touch does not get the backend's default cache when the context's is left to TensorStore");
     Require(Get<RunOptions>(Parse({"run", "cube.zarr", "--animation-frames", "8"})).animation_frames == 8,
@@ -633,6 +638,23 @@ void TestEachModeReads() {
         }
     }
     Require(frames == expected, "an animation did not read the planes from its channel on, in order");
+    Require(runner.frame_stats().has_value() == false, "a plane read alone left an animation's frame times behind");
+
+    // Prefetching the next run of chunks changes when they are read, not what any frame reads; played
+    // at a frame rate, every frame after the first is timed and none is late at a rate this slow on a
+    // fixture this small.
+    Runner prefetching(SharedContext(), image);
+    prefetching.SetAnimation(0.0, true);
+    const auto whole = PlanOperations(Mode::animation, *axes, 1, 0, 1, 0, 1, 0.05, 4).front();
+    Require(runner.Run(whole, {}).has_value() && prefetching.Run(whole, {}).has_value(), "an animation failed");
+    Require(prefetching.Fingerprint() == runner.Fingerprint(), "prefetching changed what an animation read");
+    Runner paced(SharedContext(), image);
+    paced.SetAnimation(20.0, true);
+    Require(paced.Run(whole, {}).has_value() && paced.frame_stats().has_value(), "a paced animation kept no frame times");
+    const auto& stats = *paced.frame_stats();
+    Require(stats.first_s > 0.0 && stats.median_s > 0.0 && stats.max_s >= stats.median_s,
+            "a paced animation's frame times are not times");
+    Require(stats.late <= whole.channel_count - 1, "more frames were late than were played");
     const auto [box, region_elements] = read(Mode::region);
     Require(region_elements == box.width * box.height * axes->channels, "a region did not cover its box");
     const auto region = runner.Fingerprint();

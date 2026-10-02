@@ -35,6 +35,7 @@ typical = 1
 [measure]
 trials = 1
 cold = \"off\"
+animation_fps = 100
 histogram_reference = [\"binned\"]
 generator_workers = 2
 [stage1]

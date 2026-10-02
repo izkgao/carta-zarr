@@ -93,6 +93,7 @@ DEFAULTS: dict[str, Any] = {
     "users": {"target": 1, "typical": 0},
     "measure": {"modes": list(MODES), "trials": 5, "trial_timeout": 600, "seed": 1, "cold": "auto",
                 "drop_cache_cmd": "", "ops": {}, "region_fraction": 0.05, "animation_frames": 32,
+                "animation_fps": 5, "animation_prefetch": False,
                 "histogram_reference": [],
                 "generator_workers": 0},
     "baseline": dict(BACKEND_DEFAULTS),
@@ -727,6 +728,8 @@ class Sweep:
                    str(run.trials), "--seed", str(measure["seed"]), "--trial-timeout", str(measure["trial_timeout"]),
                    "--cold", cold, "--region-fraction", str(measure["region_fraction"]),
                    "--animation-frames", str(measure["animation_frames"]),
+                   "--animation-fps", str(measure["animation_fps"]),
+                   *(["--animation-prefetch"] if measure["animation_prefetch"] else []),
                    "--histogram-method", run.histogram, *run.setting.bench_args()]
         if ops:
             command += ["--ops", ops]
@@ -878,6 +881,10 @@ class Stats:
     makespans: list[float]
     # Ranked on every operation because a group it is compared with is short.
     every_operation: bool = False
+    # An animation's frames after the first, those of them late, and the most any was late by.
+    paced_frames: int = 0
+    late_frames: int = 0
+    longest_stall: float = 0.0
 
     @property
     def first_touches(self) -> int:
@@ -952,6 +959,15 @@ class Stats:
         return statistics.median(self.makespans) if self.makespans else math.inf
 
 
+def frames_played(row: dict[str, str]) -> int:
+    """The frames an animation played, from where it read: as many as asked for, or every channel of a
+    cube with fewer."""
+    match = re.search(r"chan=(\d+):(\d+)", row.get("position") or "")
+    if match:
+        return int(match.group(2)) - int(match.group(1))
+    return int(row.get("animation_frames") or 0)
+
+
 GroupKey = tuple[str, str, tuple[str, str, str, str], int, str, str]  # stage, dataset, setting, users, mode, method
 
 
@@ -985,8 +1001,11 @@ class Results:
             if row["chunk_shape"]:
                 self.chunk_shapes[dataset] = row["chunk_shape"]
                 self.shapes[dataset] = row["shape"]
-            # An animation is timed per frame, which is what playing one feels like.
-            frames = int(row.get("animation_frames") or 0) if row["mode"] == "animation" else 0
+            # An animation is timed per frame after the first -- its turn, and whatever a late frame
+            # added to it -- which is what playing one feels like. The first is a cold read whatever
+            # the layout, and is a plane's to rank.
+            frames = frames_played(row) if row["mode"] == "animation" else 0
+            first = float(row["frame_first_s"]) if frames > 1 and row.get("frame_first_s") else None
             shares = row.get("shares_chunks") == "true"
             self.cold_methods.add(row["cold_method"])
             self.cold_failures += row["cold_ok"] != "true" and row["cold_method"] != "off"
@@ -995,7 +1014,12 @@ class Results:
             self.commits.add(row["bench_commit"])
             if row["status"] == "ok":
                 seconds, logical = float(row["seconds"]), int(row["logical_bytes"])
-                if frames:
+                if frames and first is not None:
+                    seconds, logical = (seconds - first) / (frames - 1), logical // frames
+                    stats.paced_frames += frames - 1
+                    stats.late_frames += int(row.get("late_frames") or 0)
+                    stats.longest_stall = max(stats.longest_stall, float(row.get("late_max_s") or 0.0))
+                elif frames:
                     seconds, logical = seconds / frames, logical // frames
                 stats.ops.append(Op(seconds, logical, shares, row["mode"] != "open"))
             elif row["status"] == "timeout":
@@ -1705,11 +1729,43 @@ def tradeoff_section(analysis: Analysis, ranking: list[tuple[Layout, float, floa
              "more pixels than it shows: the channels of its chunks that are not its own. A layout is on the front "
              "when no other is at least as fast in every mode here and faster in one; which of those to take is "
              f"what [weights] says. With {target} user{'s' if target > 1 else ''}, at the baseline settings.", ""]
+    measure = sweep.config["measure"]
+    fps = measure["animation_fps"]
+
+    def cell(layout: Layout, mode: str) -> str:
+        text = seconds_text(medians[layout.name][mode])
+        stats = results.get("stage1", dataset_key(layout, False), sweep.baseline, target, mode)
+        if mode == "animation" and stats and stats.paced_frames:
+            text += f" ({stats.late_frames / stats.paced_frames * 100:.0f}% late)"
+        return text
+
+    def stall(layout: Layout) -> str:
+        stats = results.get("stage1", dataset_key(layout, False), sweep.baseline, target, "animation")
+        return seconds_text(stats.longest_stall) if stats and stats.paced_frames else "–"
+
+    def run_bytes(chunk: dict[str, int], dataset: str) -> str:
+        # What a run of chunks along the spectrum holds decoded: every chunk of one depth over the plane.
+        shape = axis_lengths(results.shapes.get(dataset, ""))
+        if not shape:
+            return "–"
+        return bytes_text(shape.get("l", 1) * shape.get("m", 1) * chunk.get("frequency", 1) * 4)
+
     header = ["layout", "chunk (l×m×channels)", "depth"] + [
-        "animation per frame" if mode == "animation" else mode for mode in modes] + ["front"]
-    lines += table(header, [[layout.name, chunk_text(chunk), str(chunk.get("frequency", 1))] +
-                            [seconds_text(medians[layout.name][mode]) for mode in modes] +
-                            ["yes" if layout.name in front else ""] for layout, chunk in rows])
+        f"animation per frame, {fps:g} fps" if mode == "animation" else mode for mode in modes]
+    if "animation" in modes:
+        header += ["longest stall", "chunk run"]
+    lines += table(header + ["front"],
+                   [[layout.name, chunk_text(chunk), str(chunk.get("frequency", 1))] +
+                    [cell(layout, mode) for mode in modes] +
+                    ([stall(layout), run_bytes(chunk, dataset_key(layout, False))] if "animation" in modes else []) +
+                    ["yes" if layout.name in front else ""] for layout, chunk in rows])
+    if "animation" in modes and fps:
+        lines += [f"An animation plays at {fps:g} frames a second{' with the next run of chunks prefetched' if measure['animation_prefetch'] else ''}: "
+                  "its time per frame is its turn plus whatever late frames added, a frame is late when it is not "
+                  "ready by the end of its turn, and the longest stall is the most any frame was late by. A frame "
+                  "stalls where it enters a new run of chunks along the spectrum, which costs what a plane does. "
+                  "A backend that read the next run in the background would hide most of that for one user, if its "
+                  "cache held two runs: --zarr_cache_size at least twice the chunk run.", ""]
 
     best = ranking[0][0].name if math.isfinite(ranking[0][1]) else None
     steady = []

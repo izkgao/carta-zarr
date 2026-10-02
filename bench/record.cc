@@ -93,6 +93,8 @@ const std::vector<Column>& Columns() {
         {"region_fraction", [](const Row& r) { return r.region_fraction; }},
         {"histogram_method", [](const Row& r) { return r.histogram_method; }},
         {"animation_frames", [](const Row& r) { return r.animation_frames; }},
+        {"animation_fps", [](const Row& r) { return r.animation_fps; }},
+        {"animation_prefetch", [](const Row& r) { return r.animation_prefetch; }},
         {"trial_timeout_s", [](const Row& r) { return std::to_string(r.trial_timeout_s); }},
         {"cold_method", [](const Row& r) { return r.cold_method; }},
         {"cold_ok", [](const Row& r) { return Bool(r.cold_ok); }},
@@ -114,6 +116,11 @@ const std::vector<Column>& Columns() {
         {"sys_cpu_s", [](const Row& r) { return Text(r.sys_cpu_s); }},
         {"peak_rss_bytes", [](const Row& r) { return Text(r.peak_rss_bytes); }},
         {"checksum", [](const Row& r) { return r.checksum ? Hex(*r.checksum) : std::string(); }},
+        {"frame_first_s", [](const Row& r) { return Text(r.frame_first_s); }},
+        {"frame_median_s", [](const Row& r) { return Text(r.frame_median_s); }},
+        {"frame_max_s", [](const Row& r) { return Text(r.frame_max_s); }},
+        {"late_frames", [](const Row& r) { return Text(r.late_frames); }},
+        {"late_max_s", [](const Row& r) { return Text(r.late_max_s); }},
     };
     return columns;
 }
@@ -246,6 +253,10 @@ Row RowTemplate(const RunOptions& options, Mode mode, ColdMethod cold, const Dat
     }
     if (mode == Mode::animation) {
         row.animation_frames = std::to_string(options.animation_frames);
+        std::array<char, 32> fps{};
+        std::snprintf(fps.data(), fps.size(), "%g", options.animation_fps);
+        row.animation_fps = fps.data();
+        row.animation_prefetch = Bool(options.animation_prefetch);
     }
     row.trial_timeout_s = options.trial_timeout.count();
     row.cold_method = ColdMethodName(cold);
@@ -261,7 +272,7 @@ Row RowTemplate(const RunOptions& options, Mode mode, ColdMethod cold, const Dat
     for (const auto& part :
          {identity, row.tuning, options.image_id, row.mode, std::to_string(row.processes), std::to_string(row.io_threads),
           std::to_string(row.decode_threads), row.cache_bytes, std::to_string(row.read_budget_bytes),
-          std::to_string(row.seed), std::to_string(row.ops), row.region_fraction, row.histogram_method, row.animation_frames,
+          std::to_string(row.seed), std::to_string(row.ops), row.region_fraction, row.histogram_method, row.animation_frames, row.animation_fps, row.animation_prefetch,
           std::to_string(row.trial_timeout_s), row.cold_method, row.label}) {
         key += '|';
         key += part;
