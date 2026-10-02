@@ -19,7 +19,9 @@ the test chose."""
 from __future__ import annotations
 
 import math
+import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -174,6 +176,42 @@ class ReadingAlike(unittest.TestCase):
         mine, stranger = layout("mine"), layout("stranger")
         results = sweep.Results([row(stranger, "plane", 0.1)], datasets(mine))
         self.assertEqual(results.groups, {})
+
+
+class ReadingTheCsv(unittest.TestCase):
+    """The bench refuses to append to a CSV of another version; the sweep refuses to read one. A
+    report made from columns whose meaning has moved is wrong without saying so."""
+
+    def write(self, directory: Path, versions: list[str]) -> Path:
+        path = directory / "results.csv"
+        lines = ["csv_version,label"] + [f"{version},stage1" for version in versions]
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_the_sweep_reads_the_version_the_bench_writes(self) -> None:
+        header = Path(__file__).resolve().parent.parent / "bench" / "record.h"
+        match = re.search(r"kCsvVersion = (\d+);", header.read_text())
+        self.assertIsNotNone(match, "bench/record.h no longer says kCsvVersion")
+        self.assertEqual(sweep.CSV_VERSION, int(match.group(1)),
+                         "sweep.py and carta-zarr-bench disagree about which CSV they speak")
+
+    def test_a_csv_of_this_version_is_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = sweep.load_rows(self.write(Path(directory), [str(sweep.CSV_VERSION)] * 2))
+        self.assertEqual(len(rows), 2)
+
+    def test_a_csv_of_another_version_is_refused_and_says_which(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(Path(directory), [str(sweep.CSV_VERSION), str(sweep.CSV_VERSION - 1)])
+            with self.assertRaises(SystemExit) as refused:
+                sweep.load_rows(path)
+        message = str(refused.exception)
+        self.assertIn(f"version {sweep.CSV_VERSION - 1}", message)
+        self.assertIn(f"version {sweep.CSV_VERSION}", message)
+
+    def test_no_csv_yet_is_no_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(sweep.load_rows(Path(directory) / "results.csv"), [])
 
 
 class Recommending(unittest.TestCase):

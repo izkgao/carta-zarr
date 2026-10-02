@@ -65,6 +65,10 @@ FIRST_TOUCH_MODES = ("plane", "spectrum", "region")
 # of users, mode and method on other layouts and settings, so that no layout is ranked on cache hits
 # its rivals were spared.
 MIN_FIRST_TOUCHES = 5
+# The version of results.csv this sweep reads, which is carta-zarr-bench's kCsvVersion in
+# bench/record.h; sweep_results_test.py holds the two equal. A version changes when what a column means
+# does, so a CSV of another one is refused rather than read as though it were this one.
+CSV_VERSION = 7
 # carta-zarr-bench's operations per user per trial when measure.ops does not say.
 BENCH_DEFAULT_OPS = {"plane": 16, "animation": 2, "spectrum": 32, "region": 1, "cube-histogram": 1, "open": 8}
 # The modes of the trade-off between deep chunks and shallow ones, in the order the table shows them.
@@ -975,11 +979,21 @@ GroupKey = tuple[str, str, tuple[str, str, str, str], int, str, str]  # stage, d
 
 
 def load_rows(path: Path) -> list[dict[str, str]]:
-    """Every row of a results.csv, as carta-zarr-bench wrote them; none when there is no file yet."""
+    """Every row of a results.csv, as carta-zarr-bench wrote them; none when there is no file yet.
+
+    Refuses a file with any row of another CSV_VERSION. The bench will not append to one, so such a
+    file was written by another build; what its columns mean is not what this sweep reads them as, and
+    a report made from it would be wrong without saying so."""
     if not path.is_file():
         return []
     with open(path, newline="") as file:
-        return list(csv.DictReader(file))
+        rows = list(csv.DictReader(file))
+    found = sorted({row.get("csv_version") or "none" for row in rows} - {str(CSV_VERSION)})
+    if found:
+        raise SystemExit(f"{path} has rows of CSV version {', '.join(found)}, and this sweep.py reads version "
+                         f"{CSV_VERSION}. Sweep into a new --output, or report it with the sweep.py of the "
+                         "carta-zarr-bench that wrote it.")
+    return rows
 
 
 class Results:
