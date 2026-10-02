@@ -130,23 +130,23 @@ protected:
      * Visit every plane of the channels [begin, end), a band of chunk rows at a time -- and a band in
      * pieces along its rows when one row is wider than a read may decode.
      *
-     * A piece sampling steps over entirely is not read, but its chunks are counted as it is passed,
-     * so that what `before_read` is told reaches the whole.
+     * Only the chunks the plan's sample has a pixel in are read or counted; see PassPlan::layer_chunks.
      */
     template <typename BeforeRead, typename Visit>
     Result<void> OverBands(SelectionChannel begin, SelectionChannel end, std::uint64_t& reads_done,
                            std::uint64_t& chunks_done, BeforeRead&& before_read, Visit&& visit) {
-        const std::uint64_t row_chunks = std::max<std::uint64_t>(1, ((_plan.u_length - 1) / _plan.chunk_u) + 1);
-        for (std::uint64_t v_begin = 0; v_begin < _plan.v_length;) {
-            const std::uint64_t v_end = std::min(_plan.v_length, v_begin + (_plan.band_rows * _plan.chunk_v));
-            const std::uint64_t band_rows = (((v_end - v_begin) - 1) / _plan.chunk_v) + 1;
+        // The chunk rows and columns the sample has a pixel in -- every one unless it steps over some
+        // -- in bands of as many rows as a read affords. A chunk the sample steps over is neither read
+        // nor counted, so what progress is a fraction of is what is decoded; it used to be counted as
+        // it was passed, which a sampled walk's report could never reach the end of.
+        const auto rows = ChunksSampled(_plan.v_length, _plan.chunk_v, _plan.sample);
+        const auto columns = ChunksSampled(_plan.u_length, _plan.chunk_u, _plan.sample);
+        for (std::uint64_t row = 0; row < rows.size();) {
+            const std::uint64_t band_rows = std::min(_plan.band_rows, rows.size() - row);
             SlabFootprint band;
-            SampledRange(v_begin, v_end, _plan.sample, band.v_start, band.v_count);
-            if (band.v_count == 0) {
-                chunks_done += row_chunks * band_rows * _plan.ChunksTouched(begin, end);
-                v_begin = v_end;
-                continue;
-            }
+            SampledRange(rows[row] * _plan.chunk_v,
+                         std::min(_plan.v_length, (rows[row + band_rows - 1] + 1) * _plan.chunk_v), _plan.sample,
+                         band.v_start, band.v_count);
             band.u_stride = _plan.sample;
             band.v_stride = _plan.sample;
 
@@ -154,22 +154,19 @@ protected:
             // reads a run: band_rows floors at one, so without this the smallest read is a whole
             // chunk row, however many budgets wide that is.
             const std::uint64_t segment_chunks = _plan.UnitsAffordable(band_rows);
-            for (std::uint64_t first = 0; first < row_chunks;) {
-                const std::uint64_t width = std::min(segment_chunks, row_chunks - first);
+            for (std::uint64_t column = 0; column < columns.size();) {
+                const std::uint64_t width = std::min(segment_chunks, columns.size() - column);
                 SlabFootprint segment = band;
-                SampledRange(first * _plan.chunk_u, std::min(_plan.u_length, (first + width) * _plan.chunk_u),
-                             _plan.sample, segment.u_start, segment.u_count);
+                SampledRange(columns[column] * _plan.chunk_u,
+                             std::min(_plan.u_length, (columns[column + width - 1] + 1) * _plan.chunk_u), _plan.sample,
+                             segment.u_start, segment.u_count);
                 segment.chunks = width * band_rows;
-                first += width;
-                if (segment.u_count == 0) {
-                    chunks_done += segment.chunks * _plan.ChunksTouched(begin, end);
-                    continue;
-                }
+                column += width;
                 if (auto walked = Over(segment, begin, end, reads_done, chunks_done, before_read, visit); !walked) {
                     return walked.error();
                 }
             }
-            v_begin = v_end;
+            row += band_rows;
         }
         return {};
     }

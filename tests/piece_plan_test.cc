@@ -286,6 +286,44 @@ void TestApplyingTheFlagCostsTheBudget() {
             "a read that also decodes the flag cannot afford as much of the spectrum per piece");
 }
 
+// A stride of a chunk or more along an axis the read is not cut on steps over whole chunks, and the
+// chunks it steps over are not decoded -- so they are not what a piece's budget is spent on. Every
+// other column of 16-wide chunks is two chunks across the image, not the three its first and last
+// element span, and a budget of 24 chunks buys three channels a piece rather than two.
+void TestChunksAStrideStepsOverCostNothing() {
+    const auto image = MakeImage(64, 64, 32);
+    const auto geometry = MakeGeometry(16, 16, 1);
+    auto request = WholeImage(image);
+    request.axes.at(0) = Range{0, 2, 32};  // columns 0 and 32: chunks 0 and 2
+    ReadOptions budget;
+    budget.read_budget_bytes = 24 * 16 * 16 * sizeof(float);
+
+    const auto pieces = Pieces(image, geometry, request, budget);
+    for (std::size_t i = 0; i + 1 < pieces.size(); ++i) {
+        Require(pieces.at(i).request.axes.at(2).count == 3,
+                "a piece holds " + std::to_string(pieces.at(i).request.axes.at(2).count) +
+                    " channels: two chunks across and four down is eight a channel, and 24 buys three");
+    }
+    RequireTheyFillTheDestination(pieces, request, "a read striding over whole chunks");
+}
+
+// The same along the axis the read is cut on: every eighth channel of a spectrum chunked four deep is
+// one chunk a channel, so a budget of two chunks is two channels a piece -- not the one it was when a
+// piece's length was its chunks times the chunk depth divided by the stride.
+void TestAStrideOverWholeChunksAlongTheCutIsAChunkAnElement() {
+    const auto image = MakeImage(64, 64, 32);
+    const auto geometry = MakeGeometry(64, 64, 4);
+    auto request = WholeImage(image);
+    request.axes.at(2) = Range{0, 4, 8};  // channels 0, 8, 16 and 24, a chunk each
+    ReadOptions budget;
+    budget.read_budget_bytes = 2 * 64 * 64 * 4 * sizeof(float);
+
+    const auto pieces = Pieces(image, geometry, request, budget);
+    Require(pieces.size() == 2, "four channels a chunk apart under a two-chunk budget are two pieces, not " +
+                                    std::to_string(pieces.size()));
+    RequireTheyFillTheDestination(pieces, request, "a strided spectrum");
+}
+
 }  // namespace
 
 int main() {
@@ -297,6 +335,8 @@ int main() {
         TestATighterCeilingBuysFewerChunks();
         TestNoChunkIsReadByTwoPieces();
         TestApplyingTheFlagCostsTheBudget();
+        TestChunksAStrideStepsOverCostNothing();
+        TestAStrideOverWholeChunksAlongTheCutIsAChunkAnElement();
     } catch (const std::exception& error) {
         std::cerr << "piece plan test failed: " << error.what() << "\n";
         return 1;

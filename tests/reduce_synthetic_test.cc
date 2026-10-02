@@ -769,14 +769,10 @@ std::string Describe(const std::vector<double>& reported) {
 // a layer, two layers deep -- so it reports seven times, at one through seven eighths.
 //
 // Sampled every eighth pixel, a 16 x 16 plane of 4 x 4 chunks keeps pixels only in the chunks whose
-// first row and column are multiples of eight: four of sixteen. The chunks it steps over entirely
-// are not read but are still counted, as they are passed, so the fraction jumps over them. Walking
-// the bands in order, with x marking a read and . a chunk stepped over:
-//
-//   x . x .    read 1 (no report), skip, read 2 at 2/16, skip
-//   . . . .    the whole band skipped: 8/16 by its end
-//   x . x .    read 3 at 8/16, skip, read 4 at 10/16, skip
-//   . . . .
+// first row and column are multiples of eight: four of sixteen. Those four are the run, and the
+// chunks the sample steps over are neither read nor counted, so it reports at one, two and three
+// quarters. It used to count the stepped-over chunks as it passed them, which made the fraction jump
+// over what it did not read -- 2/16, 8/16, 10/16 -- and end three quarters short of the whole.
 void TestACubeHistogramReportsEveryReadButItsFirst() {
     {
         const auto image = MakeImage(8, 8, 8);
@@ -793,7 +789,7 @@ void TestACubeHistogramReportsEveryReadButItsFirst() {
         const auto geometry = MakeGeometry(4, 4, 4);
         SyntheticPixelSource source(image, geometry, Value);
         const auto reported = CubeProgress(source, image, geometry, Range{0, 4, 1}, 8);
-        const std::vector<double> expected{2.0 / 16, 8.0 / 16, 10.0 / 16};
+        const std::vector<double> expected{1.0 / 4, 2.0 / 4, 3.0 / 4};
         Require(reported == expected,
                 "a sampled cube reported" + Describe(reported) + " rather than" + Describe(expected));
         Require(source.pixel_reads() == 4, "four reads, not " + std::to_string(source.pixel_reads()));

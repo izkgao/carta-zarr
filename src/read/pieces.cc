@@ -48,14 +48,22 @@ std::uint64_t UnitsPerPiece(const ReadRequest& request, const ChunkGeometry& geo
         }
         const auto chunk = i < geometry.chunk_shape.size() ? geometry.chunk_shape.at(i) : 0;
         const auto& range = request.axes.at(i);
-        other_chunks *= ChunksSpanned(range.start, range.count, range.stride, chunk);
+        // The chunks this axis decodes, which a stride of a chunk or more makes fewer than the chunks
+        // its first and last element span. An axis with no chunk to speak of is one.
+        other_chunks *= chunk == 0 ? 1 : std::max<std::uint64_t>(1, ChunksTouched(range.start, range.count,
+                                                                                  range.stride, chunk));
     }
     const auto row_bytes = cost.chunk_bytes * other_chunks;
     // At least one chunk: a piece smaller than that would decode the same chunk twice.
     const auto chunks = std::max<std::uint64_t>(1, cost.budget_bytes / std::max<std::uint64_t>(1, row_bytes));
     const auto chunk = axis < geometry.chunk_shape.size() ? geometry.chunk_shape.at(axis) : 0;
     const auto stride = std::max<std::uint64_t>(1, request.axes.at(axis).stride);
-    // AlignedBlockEnd rounds this out to a whole chunk, so a low estimate costs nothing.
+    // A stride of a chunk or more puts every element of the cut in a chunk of its own, so an element
+    // is a chunk. Below that a chunk holds about chunk / stride of them; AlignedBlockEnd rounds the
+    // piece out to a whole chunk, so a low estimate costs nothing.
+    if (chunk != 0 && stride >= chunk) {
+        return chunks;
+    }
     return std::max<std::uint64_t>(1, (chunks * std::max<std::uint64_t>(1, chunk)) / stride);
 }
 
