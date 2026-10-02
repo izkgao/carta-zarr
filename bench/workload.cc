@@ -6,12 +6,14 @@
 
 #include "workload.h"
 
+#include <carta-zarr/read_ahead.h>
+
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -366,10 +368,6 @@ Runner::Runner(const Context& context, Image image, HistogramMethod histogram, s
         _axes = *axes;
         // Sized here so that no operation pays for growing it.
         _pixels.resize(std::max(_axes->width * _axes->height, _axes->channels));
-        const auto& chunk = _image->chunk_geometry().chunk_shape;
-        if (_axes->spectral < chunk.size()) {
-            _spectral_chunk = std::max<std::uint64_t>(chunk[_axes->spectral], 1);
-        }
         _exact.reserve(_axes->channels * 4);
     }
 }
@@ -431,18 +429,16 @@ Result<std::uint64_t> Runner::Run(const Operation& operation, const ReadOptions&
 // the end of it; a frame that runs over pushes the ones after it back, as a viewer waiting on it would
 // see.
 //
-// With prefetch, the first frame of each run of chunks along the spectrum is followed by a
-// Prefetch of the next run on a thread of its own, which decodes that run's chunks into the cache
-// while this run's frames play from it -- one at a time, so a prefetch is never started while one is
-// still under way. A prefetch is for the time a frame leaves over: once a frame is late while one is
-// under way there are no more for the rest of the animation, since the machine has no time over and
-// decoding ahead takes it from the frames being played. Measured with eight animations of a
-// 7763 x 4742 cube at once, prefetches that kept ahead of every run still doubled the time of the
-// frames played from the cache. A prefetch the animation catches up with is counted as late, but is
-// no reason to stop: the frame that caught it waits for the decode under way rather than starting
-// another.
+// With prefetch, reading ahead is the library's ReadAhead, as carta-backend's is: told after every
+// frame when it began, whether it was late and which planes come next, it decodes the next run of
+// chunks on a thread of its own while this run's frames play from the cache -- one at a time, none once
+// a frame is late while one is under way, and none at all unless the cache the frames read through
+// holds two runs. A context left to TensorStore's cache holds nothing, so without --cache-bytes nothing
+// is read ahead, and the reason is said on stderr. A prefetch the animation catches up with is counted
+// as late, but is no reason to stop: the frame that caught it waits for the decode under way rather
+// than starting another. See ReadAhead and ADR 0016.
 Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOptions& options) {
-    using Clock = std::chrono::steady_clock;
+    using Clock = ReadAhead::Clock;
     std::uint64_t hash = kFnvOffset;
     std::uint64_t elements = 0;
     Operation frame = operation;
@@ -450,64 +446,54 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
     const auto& axes = *_axes;
     const auto period = _fps > 0.0 ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / _fps))
                                    : Clock::duration::zero();
-    const auto run_of = [this](std::uint64_t channel) { return channel / _spectral_chunk; };
-    const auto end = operation.channel + operation.channel_count;
-
-    FrameStats stats;
-    stats.frames = static_cast<unsigned>(operation.channel_count);
-    std::thread prefetcher;
-    std::atomic<bool> prefetched{true};
-    std::optional<std::uint64_t> prefetching;
-    bool reading_ahead = _prefetch;
-    const auto prefetch = [&](std::uint64_t run) {
-        if (prefetcher.joinable()) {
-            prefetcher.join();
-        }
+    const auto plane_at = [&](std::uint64_t channel) {
         ReadRequest request;
         request.axes.assign(axes.rank, Range{0, 1, 1});
         request.axes[axes.x] = Range{0, axes.width, 1};
         request.axes[axes.y] = Range{0, axes.height, 1};
-        request.axes[axes.spectral] = Range{run * _spectral_chunk, 1, 1};
+        request.axes[axes.spectral] = Range{channel, 1, 1};
         if (axes.polarization) {
             request.axes[*axes.polarization] = Range{operation.polarization, 1, 1};
         }
-        prefetching = run;
-        prefetched = false;
-        ++stats.prefetches;
-        prefetcher = std::thread([this, request, options, &prefetched] {
-            (void)_image->Prefetch(request, options);
-            prefetched = true;
-        });
+        return AnimatedPlane{0, std::move(request)};
     };
 
+    std::optional<ReadAhead> reading;
+    if (_prefetch) {
+        auto made = ReadAhead::For({{*_image, options}});
+        if (made) {
+            reading = std::move(made).value();
+        } else {
+            std::fprintf(stderr, "carta-zarr-bench: an animation reads nothing ahead: %s\n",
+                         made.error().message.c_str());
+        }
+    }
+
+    FrameStats stats;
+    stats.frames = static_cast<unsigned>(operation.channel_count);
     std::vector<double> reads;
     const auto start = Clock::now();
     auto turn = start;
     for (std::uint64_t index = 0; index < operation.channel_count; ++index) {
         frame.channel = operation.channel + index;
-        const bool enters_run = index == 0 || run_of(frame.channel) != run_of(frame.channel - 1);
-        if (enters_run && prefetching == run_of(frame.channel) && !prefetched) {
-            ++stats.late_prefetches;
-        }
         if (period > Clock::duration::zero()) {
             std::this_thread::sleep_until(turn);
         }
-        const bool overlapped = prefetcher.joinable() && !prefetched;
         const auto began = Clock::now();
         auto read = Read(frame, options);
         const auto done = Clock::now();
-        if (period > Clock::duration::zero() && done > turn + period && overlapped) {
-            reading_ahead = false;
-        }
         if (!read) {
-            if (prefetcher.joinable()) {
-                prefetcher.join();
-            }
             return read;
         }
         elements += *read;
-        if (reading_ahead && enters_run && (run_of(frame.channel) + 1) * _spectral_chunk < end) {
-            prefetch(run_of(frame.channel) + 1);
+        const bool late = period > Clock::duration::zero() && done > turn + period;
+        if (reading) {
+            std::vector<std::vector<AnimatedPlane>> upcoming;
+            const auto left = operation.channel_count - index - 1;
+            for (std::uint64_t ahead = 1; ahead <= std::min<std::uint64_t>(left, ReadAhead::kUpcomingFrames); ++ahead) {
+                upcoming.push_back({plane_at(frame.channel + ahead)});
+            }
+            reading->Served(began, late, {plane_at(frame.channel)}, upcoming);
         }
         // Played at a frame rate, only the last frame is fingerprinted: a plane of a large cube takes
         // longer to hash than a frame's turn, and hashing every one would make every frame late.
@@ -520,7 +506,7 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
             stats.first_s = seconds;
         } else {
             reads.push_back(seconds);
-            if (period > Clock::duration::zero() && done > turn + period) {
+            if (late) {
                 ++stats.late;
                 stats.late_max_s = std::max(stats.late_max_s, std::chrono::duration<double>(done - turn - period).count());
             }
@@ -528,8 +514,10 @@ Result<std::uint64_t> Runner::Animate(const Operation& operation, const ReadOpti
         // The next frame's turn follows this one's, or this frame's end when it ran over.
         turn = std::max(turn + period, done);
     }
-    if (prefetcher.joinable()) {
-        prefetcher.join();
+    if (reading) {
+        const auto ahead = reading->stats();
+        stats.prefetches = ahead.prefetches;
+        stats.late_prefetches = ahead.caught_up;
     }
     if (!reads.empty()) {
         std::sort(reads.begin(), reads.end());
