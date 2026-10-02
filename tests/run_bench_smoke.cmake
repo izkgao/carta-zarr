@@ -31,7 +31,8 @@ math(EXPR per_trial "2 * (16 + 2 + 32 + 1 + 1 + 8)")
 
 function(run_and_count trials expected)
     execute_process(
-        COMMAND "${BENCH}" run "${FIXTURE}" --processes 2 --trials ${trials} --cold off --csv "${csv}" ${ARGN}
+        COMMAND "${BENCH}" run "${FIXTURE}" --processes 2 --trials ${trials} --cold off --csv "${csv}"
+                --animation-fps 200 ${ARGN}
         RESULT_VARIABLE result
         ERROR_VARIABLE log)
     if(result)

@@ -71,8 +71,9 @@ carta-zarr-bench run /lustre/scratch/zarr-bench/<dataset> --processes 8 \
 `probe` prints what the library sees of a dataset as one line of JSON, and fails when it would not
 open. `run` writes one CSV row per operation; `--help` lists its options.
 
-- **Modes.** `plane` reads a whole plane at a random channel, `animation` reads
-  `--animation-frames` consecutive planes (32) from a random channel, `spectrum` every channel at a
+- **Modes.** `plane` reads a whole plane at a random channel, `animation` plays
+  `--animation-frames` consecutive planes (32) from a random channel at `--animation-fps` frames a
+  second (5, as CARTA's animator does), recording which frames were late and by how much, `spectrum` every channel at a
   random pixel, `region` reduces every statistic over a box covering `--region-fraction` of the plane
   (5%), `cube-histogram` bins the cube, and `open` times `Context::Create`, `Dataset::Open` and
   `OpenImage` together. `--ops 8,spectrum=64` sets how many operations each makes per trial.

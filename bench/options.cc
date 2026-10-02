@@ -36,11 +36,11 @@ constexpr std::array<std::pair<ColdMethod, std::string_view>, 4> kColdMethods{{
 
 // The options of run that take a value, so that one it does not know is reported as unknown rather
 // than as missing its value.
-constexpr std::array<std::string_view, 18> kRunOptions{
+constexpr std::array<std::string_view, 19> kRunOptions{
     "--image", "--mode", "--trials", "--ops", "--seed",
     "--io-threads", "--decode-threads", "--cache-bytes", "--read-budget-bytes", "--processes",
     "--cold", "--drop-cache-cmd", "--trial-timeout", "--csv", "--label",
-    "--region-fraction", "--histogram-method", "--animation-frames",
+    "--region-fraction", "--histogram-method", "--animation-frames", "--animation-fps",
 };
 
 constexpr std::string_view kUsage = R"(usage:
@@ -51,8 +51,8 @@ probe opens the dataset as carta-backend would and prints what the library sees,
 It exits non-zero when the dataset does not open.
 
 run measures reads of the dataset and writes one CSV row per operation. plane and spectrum read
-each operation through a cache of its own, so that each is a first touch; animation reads through
-the shared one, as playing a cube does.
+each operation through a cache of its own, so that each is a first touch; animation plays frames at a
+frame rate through the shared one, as CARTA's animator does, and records which frames were late.
 
   --image ID                 the image to read; the dataset's default image otherwise
   --mode LIST                plane,animation,spectrum,region,cube-histogram,open (all by default)
@@ -61,6 +61,10 @@ the shared one, as playing a cube does.
                              or both, as in 8,spectrum=64 (plane 16, animation 2, spectrum 32,
                              region 1, cube-histogram 1, open 8)
   --animation-frames N       consecutive planes one animation operation reads (32)
+  --animation-fps F          play animations at F frames a second, as CARTA's animator does; 0 reads
+                             the frames back to back (5)
+  --animation-prefetch       read the next run of chunks along the spectrum in the background, as a
+                             backend that prefetched would
   --region-fraction F        the share of the plane a region box covers (0.05)
   --histogram-method METHOD  exact, binned or sampled:N, as the backend's --zarr_histogram_method (exact)
   --seed N                   where the random positions come from (1)
@@ -204,6 +208,10 @@ Command ParseRun(Arguments& arguments) {
             options.resume = true;
             continue;
         }
+        if (word == "--animation-prefetch") {
+            options.animation_prefetch = true;
+            continue;
+        }
 
         const auto value = arguments.Value(word);
         if (std::find(kRunOptions.begin(), kRunOptions.end(), word) == kRunOptions.end()) {
@@ -243,6 +251,14 @@ Command ParseRun(Arguments& arguments) {
             if (!count(options.animation_frames, 1)) {
                 return bad();
             }
+        } else if (word == "--animation-fps") {
+            char* end = nullptr;
+            const std::string text(*value);
+            const double fps = std::strtod(text.c_str(), &end);
+            if (text.empty() || end != text.c_str() + text.size() || !(fps >= 0.0)) {
+                return bad();
+            }
+            options.animation_fps = fps;
         } else if (word == "--region-fraction") {
             char* end = nullptr;
             const std::string text(*value);

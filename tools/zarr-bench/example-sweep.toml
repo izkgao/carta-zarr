@@ -80,8 +80,13 @@ drop_cache_cmd = ""
 ops = {}
 # The share of the plane a region covers.
 region_fraction = 0.05
-# The frames one animation plays.
+# The frames one animation plays, and how fast: CARTA's animator plays 5 a second unless the user
+# changes it. A frame is late when it is not ready by the end of its turn, which happens where an
+# animation enters a new run of chunks along the spectrum. animation_prefetch measures a backend that
+# read the next run in the background -- carta-backend does not yet -- to see what it would hide.
 animation_frames = 32
+animation_fps = 5
+animation_prefetch = false
 # One-pass cube histograms to time against the backend's exact two passes, for reference only:
 # "binned", "sampled:4".
 histogram_reference = []

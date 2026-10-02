@@ -90,6 +90,19 @@ std::vector<Operation> PlanOperations(Mode mode, const CubeAxes& axes, std::uint
 void MarkSharedChunks(std::vector<std::vector<Operation>>& plans, const CubeAxes& axes,
                       const std::vector<std::uint64_t>& chunk_shape);
 
+// How an animation's frames went, the first apart: it is a cold read whatever the layout, and what a
+// layout decides is how the frames after it go.
+struct FrameStats {
+    double first_s = 0.0;
+    // The read times of every frame after the first.
+    double median_s = 0.0;
+    double max_s = 0.0;
+    // Frames after the first not ready by the end of their turn, and the most any was late by. Zero
+    // when the frames are read back to back, which gives them no turn to miss.
+    unsigned late = 0;
+    double late_max_s = 0.0;
+};
+
 // Runs operations against one image and remembers enough of the last result to fingerprint it.
 //
 // The fingerprint is taken after the clock stops, and only of what every layout of the same pixels
@@ -110,6 +123,18 @@ public:
            std::size_t first_touch_bytes = std::size_t{1} << 30);
     // For open.
     Runner(ContextOptions context, std::string dataset, std::string image_id);
+
+    // How animations are played: at `fps` frames a second, 0 for back to back, and with the next run of
+    // chunks along the spectrum read in the background as each is entered when `prefetch`.
+    void SetAnimation(double fps, bool prefetch) {
+        _fps = fps;
+        _prefetch = prefetch;
+    }
+
+    // How the last animation's frames went.
+    const std::optional<FrameStats>& frame_stats() const noexcept {
+        return _frame_stats;
+    }
 
     // What an operation needs that is not part of what it measures, done before the clock starts:
     // a fresh cache pool for a plane or a spectrum, with the previous one let go of.
@@ -140,6 +165,11 @@ private:
     std::optional<CachePool> _keeping_nothing;
     std::size_t _first_touch_bytes = 0;
     std::optional<CachePool> _first_touch;
+    double _fps = 0.0;
+    bool _prefetch = false;
+    std::uint64_t _spectral_chunk = 1;
+    std::vector<float> _prefetched;
+    std::optional<FrameStats> _frame_stats;
     ContextOptions _context;
     std::string _dataset;
     std::string _image_id;

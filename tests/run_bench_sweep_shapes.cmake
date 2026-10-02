@@ -35,6 +35,7 @@ target = 1
 [measure]
 trials = 1
 cold = \"off\"
+animation_fps = 100
 generator_workers = 2
 ops = { plane = 2, spectrum = 4 }
 [stage1]
