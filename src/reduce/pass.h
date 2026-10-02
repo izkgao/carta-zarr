@@ -182,7 +182,8 @@ private:
 };
 
 /**
- * Visit every plane of one channel range, a band of chunk rows at a time.
+ * Visit every plane of one channel range, a band of chunk rows at a time -- and a band in pieces
+ * along its rows when one row is wider than a read may decode.
  *
  * `before_read` runs before each read after the first of the range, which is where a caller reports
  * what it has or decides to stop. `visit` receives one `Slab`.
@@ -197,23 +198,39 @@ Result<void> RunPass(const PixelSource& source, const PassPlan& plan, const Read
     SlabWalk walk(source, plan, options);
     std::uint64_t reads_done = 0;
 
+    const std::uint64_t row_chunks = std::max<std::uint64_t>(1, ((plan.u_length - 1) / plan.chunk_u) + 1);
     for (std::uint64_t v_begin = 0; v_begin < plan.v_length;) {
         const std::uint64_t v_end = std::min(plan.v_length, v_begin + (plan.band_rows * plan.chunk_v));
+        const std::uint64_t band_rows = (((v_end - v_begin) - 1) / plan.chunk_v) + 1;
         SlabFootprint band;
         SampledRange(v_begin, v_end, plan.sample, band.v_start, band.v_count);
-        band.chunks = std::max<std::uint64_t>(
-            1, (((plan.u_length - 1) / plan.chunk_u) + 1) * ((((v_end - v_begin) - 1) / plan.chunk_v) + 1));
         if (band.v_count == 0) {
-            chunks_done += band.chunks * plan.ChunksTouched(begin, end);
+            chunks_done += row_chunks * band_rows * plan.ChunksTouched(begin, end);
             v_begin = v_end;
             continue;
         }
-        SampledRange(0, plan.u_length, plan.sample, band.u_start, band.u_count);
         band.u_stride = plan.sample;
         band.v_stride = plan.sample;
 
-        if (auto walked = walk.Over(band, begin, end, reads_done, chunks_done, before_read, visit); !walked) {
-            return walked.error();
+        // A chunk row wider than a read is read in pieces along it, as Occupancy::Footprints reads a
+        // run: band_rows floors at one, so without this the smallest read is a whole chunk row,
+        // however many budgets wide that is.
+        const std::uint64_t segment_chunks = plan.UnitsAffordable(band_rows);
+        for (std::uint64_t first = 0; first < row_chunks;) {
+            const std::uint64_t width = std::min(segment_chunks, row_chunks - first);
+            SlabFootprint segment = band;
+            SampledRange(first * plan.chunk_u, std::min(plan.u_length, (first + width) * plan.chunk_u), plan.sample,
+                         segment.u_start, segment.u_count);
+            segment.chunks = width * band_rows;
+            first += width;
+            if (segment.u_count == 0) {
+                chunks_done += segment.chunks * plan.ChunksTouched(begin, end);
+                continue;
+            }
+            if (auto walked = walk.Over(segment, begin, end, reads_done, chunks_done, before_read, visit);
+                !walked) {
+                return walked.error();
+            }
         }
         v_begin = v_end;
     }

@@ -215,23 +215,20 @@ void TestAnUnfinishedBlockIsHandedOver(const carta::zarr::Image& sky) {
     options.read_budget_bytes = 40;  // one chunk of the fixture
     const auto collected = Collect(sky, WholeSpectrum(0, 0.0F, 2000.0F, 16), options);
 
-    // The walk reads a band of the slower spatial axis at a time, so it can only split when the
-    // plane spans more than one chunk along that axis. The fixture's chunk is 2 by 5, so one of the
-    // two storage orders can split and the other cannot -- which is worth stating rather than
-    // asserting blindly, because the counts below are checked either way.
+    // The walk reads a band of the slower spatial axis at a time, and a band in pieces along the
+    // faster one when a chunk row is wider than the budget, so a budget of one chunk splits any plane
+    // that spans more than one chunk along either axis. The fixture's chunk is 2 by 5 over a 4 by 5
+    // plane, so both storage orders split; stated rather than assumed, because the counts below are
+    // checked either way.
     const auto& chunk = sky.chunk_geometry().chunk_shape;
-    const bool y_is_fast = sky.chunk_geometry().fastest_spatial_axis == carta::zarr::AxisRole::spatial_y;
-    const std::uint64_t slow_length = y_is_fast ? kL : kM;
-    const std::uint64_t slow_chunk = y_is_fast ? chunk.at(0) : chunk.at(1);
-    if (slow_length > slow_chunk) {
+    if (kL > chunk.at(0) || kM > chunk.at(1)) {
         Require(collected.partial_blocks > 0,
                 "a budget of one chunk should take more than one read when the plane spans more than "
-                "one chunk along the slower axis; if the fixture's chunk shape changed, this no "
-                "longer splits and the test stops testing it");
+                "one chunk; if the fixture's chunk shape changed, this no longer splits and the test "
+                "stops testing it");
     } else {
         Require(collected.partial_blocks == 0,
-                "a plane that is one chunk deep along the slower axis is one read, so nothing should "
-                "have been handed over early");
+                "a plane that is one chunk is one read, so nothing should have been handed over early");
     }
     const auto expected = Expected(0, 0, 0.0F, 2000.0F, 16);
     for (std::size_t bin = 0; bin < expected.size(); ++bin) {

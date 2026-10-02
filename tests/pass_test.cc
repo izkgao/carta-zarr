@@ -449,6 +449,51 @@ void TestALargePlaneSplitsIntoBands() {
     Require(source.chunks_touched() == 8ULL * 8ULL * 4ULL, "over every chunk of it");
 }
 
+// A chunk row wider than the budget is read in pieces along it, not as one band a row deep. Without
+// this the smallest read a whole-plane pass makes is a full chunk row: eight chunks against a
+// budget of two here, and on a 32768-wide image of 4 MiB chunks, 256 MiB against 64.
+void TestAChunkRowWiderThanTheBudgetIsSplitAlongIt() {
+    const auto image = MakeImage(16, 64, 2);
+    // m is fastest, so u runs along the 64 pixels: eight chunks to a row.
+    const auto geometry = MakeGeometry(8, 8, 1, AxisRole::spatial_y);
+    ReadOptions options;
+    options.read_budget_bytes = 2 * 8 * 8 * 4;
+    const auto plan = Plan(image, geometry, Range{0, 2, 1}, options);
+    Require(plan.u_length == 64, "this test needs u along the wide axis");
+    SyntheticPixelSource source(image, geometry, Encoded);
+
+    const auto walked = WalkEverything(source, plan, options, 2);
+    for (const auto size : source.pixel_destinations()) {
+        Require(size <= 2U * 8U * 8U, "a read held more than its budget's two chunks");
+    }
+    Require(walked.pixels == 16ULL * 64ULL * 2ULL, "every pixel of the selection, once");
+    Require(source.most_hits_on_one_chunk() == 1, "and each chunk decoded once");
+    Require(source.chunks_touched() == 2ULL * 8ULL * 2ULL, "over every chunk of it");
+}
+
+// Sampling steps over pixels, and a piece of a row it steps over entirely is not read at all -- but
+// still counted, so that progress reaches the whole.
+void TestASampledRowSplitsAlongItToo() {
+    const auto image = MakeImage(16, 64, 1);
+    const auto geometry = MakeGeometry(8, 8, 1, AxisRole::spatial_y);
+    ReadOptions options;
+    options.read_budget_bytes = 1 * 8 * 8 * 4;
+    const auto plan = Plan(image, geometry, Range{0, 1, 1}, options, 16);
+    SyntheticPixelSource source(image, geometry, Encoded);
+
+    Walked walked;
+    std::uint64_t chunks_done = 0;
+    const auto outcome = RunPass(
+        source, plan, options, SelectionChannel{}, SelectionChannel{1}, chunks_done,
+        [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
+        [&](const Slab& slab) { walked.pixels += slab.u_count * slab.v_count; });
+    Require(static_cast<bool>(outcome), "the pass failed");
+    // u = 0, 16, 32, 48 and v = 0: one pixel in every other chunk along the row.
+    Require(walked.pixels == 4, "every sixteenth pixel each way");
+    Require(source.pixel_reads() == 4, "and only the pieces holding one are read");
+    Require(chunks_done == plan.layer_chunks, "while every chunk of the plane is counted");
+}
+
 }  // namespace
 
 int main() {
@@ -469,6 +514,8 @@ int main() {
         TestAnExpiredDeadlineStopsThePass();
         TestAReadFailureStopsThePass();
         TestALargePlaneSplitsIntoBands();
+        TestAChunkRowWiderThanTheBudgetIsSplitAlongIt();
+        TestASampledRowSplitsAlongItToo();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "pass test failed: %s\n", error.what());
         return 1;
