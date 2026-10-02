@@ -32,12 +32,17 @@ PassPlan PlanPass(const ImageDescriptor& descriptor, const ChunkGeometry& geomet
     plan.slab_budget_bytes = cost.budget_bytes;
     plan._least_channels = ((plan._chunk_depth + spectral.stride - 1) / spectral.stride);
     plan.planes = planes.selection();
-    const std::uint64_t row_chunks = std::max<std::uint64_t>(1, ((plan.u_length - 1) / plan.chunk_u) + 1);
-    const std::uint64_t column_chunks = std::max<std::uint64_t>(1, ((plan.v_length - 1) / plan.chunk_v) + 1);
+    plan.sample = std::max<std::uint64_t>(1, sample);
+    // The chunks of a layer the sample has a pixel in, which is every chunk unless it steps over some:
+    // what a read decodes, and so what the budget and progress are both counted in.
+    const auto touched = [&](std::uint64_t length, std::uint64_t chunk) {
+        return length == 0 ? 0 : ChunksTouched(0, ((length - 1) / plan.sample) + 1, plan.sample, chunk);
+    };
+    const std::uint64_t row_chunks = std::max<std::uint64_t>(1, touched(plan.u_length, plan.chunk_u));
+    const std::uint64_t column_chunks = std::max<std::uint64_t>(1, touched(plan.v_length, plan.chunk_v));
     plan.layer_chunks = std::max<std::uint64_t>(1, row_chunks * column_chunks);
     // How many chunk rows one read may hold, so that a read is a budget's worth of chunk data.
     plan.band_rows = plan.UnitsAffordable(row_chunks);
-    plan.sample = std::max<std::uint64_t>(1, sample);
     return plan;
 }
 

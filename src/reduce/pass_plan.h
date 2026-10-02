@@ -93,6 +93,9 @@ public:
     std::uint64_t chunk_bytes = 1;
     std::size_t slab_budget_bytes = 0;
     std::uint64_t band_rows = 1;
+    // The chunks of one spectral layer of the plane that the sample has a pixel in -- every chunk
+    // unless the sample steps over some. What a whole-plane walk decodes a layer of, and so what its
+    // reads are sized against and its progress counted in.
     std::uint64_t layer_chunks = 1;
     // The planes this pass is over, already checked against the descriptor above.
     PlaneSelection planes;

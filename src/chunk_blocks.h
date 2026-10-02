@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace carta::zarr::internal {
 
@@ -191,6 +192,34 @@ inline std::uint64_t ChunksTouched(std::uint64_t start, std::uint64_t count, std
         return count;
     }
     return ChunksSpanned(start, count, stride, chunk);
+}
+
+// The chunks along an axis of `length` elements that a sample of every `stride`th element from the
+// first has an element in, in order: the ones ChunksTouched counts, named. A whole-plane pass walks
+// these, so that a chunk the sample steps over is neither read nor counted.
+inline std::vector<std::uint64_t> ChunksSampled(std::uint64_t length, std::uint64_t chunk, std::uint64_t stride) {
+    std::vector<std::uint64_t> chunks;
+    if (length == 0) {
+        return chunks;
+    }
+    chunk = std::max<std::uint64_t>(1, chunk);
+    stride = std::max<std::uint64_t>(1, stride);
+    const std::uint64_t samples = ((length - 1) / stride) + 1;
+    if (stride < chunk) {
+        // No step is long enough to skip a chunk, so they are every chunk up to the last sample's.
+        const std::uint64_t last = ((samples - 1) * stride) / chunk;
+        chunks.reserve(static_cast<std::size_t>(last + 1));
+        for (std::uint64_t index = 0; index <= last; ++index) {
+            chunks.push_back(index);
+        }
+        return chunks;
+    }
+    // Every sample is in a chunk of its own.
+    chunks.reserve(static_cast<std::size_t>(samples));
+    for (std::uint64_t sample = 0; sample < samples; ++sample) {
+        chunks.push_back((sample * stride) / chunk);
+    }
+    return chunks;
 }
 
 }  // namespace carta::zarr::internal
