@@ -254,73 +254,33 @@ Result<void> ReduceSpectral(const ReducibleImage& image, const SpectralReduceReq
             for (const auto index : occupancy.RegionsTouching(chunk_cu, chunk_cv)) {
                 const std::size_t r = index;
                 const auto& region = regions.at(r);
+                const auto rows = region.RowsWithin(cell_u0, cell_u1, cell_v0, cell_v1);
 
-                const std::uint64_t ru0 = std::max(cell_u0, region.u_start);
-                const std::uint64_t ru1 = std::min(cell_u1, region.u_start + region.u_size);
-                const std::uint64_t rv0 = std::max(cell_v0, region.v_start);
-                const std::uint64_t rv1 = std::min(cell_v1, region.v_start + region.v_size);
-                if (ru0 >= ru1 || rv0 >= rv1) {
-                    continue;
-                }
-
-                for (std::uint64_t y = rv0; y < rv1; ++y) {
+                for (std::uint64_t y = rows.first; y < rows.last; ++y) {
+                    // One row's totals however many spans it is, folded once: the order the sums are
+                    // taken in is the order they always were.
                     RowTotals totals;
-                    if (region.runs != nullptr) {
-                        // Every pixel of a run is selected, so each one goes
-                        // through the same loop an unmasked region uses and the
-                        // per-pixel test never happens.
-                        const auto r = static_cast<std::size_t>(y - region.v_start);
-                        for (auto k = region.run_offsets[r];
-                             k < region.run_offsets[r + 1]; ++k) {
-                            const std::uint64_t run_begin =
-                                region.u_start + region.runs[2 * k];
-                            if (run_begin >= ru1) {
-                                break;  // runs ascend, so the rest are past the cell
-                            }
-                            const std::uint64_t run_end =
-                                region.u_start + region.runs[(2 * k) + 1];
-                            const std::uint64_t first = std::max(ru0, run_begin);
-                            const std::uint64_t last = std::min(ru1, run_end);
-                            if (first >= last) {
-                                continue;
-                            }
-                            const float* span = plane + ((y - v_begin) * stride_v) +
-                                                ((first - u_begin) * stride_u);
+                    const float* row = plane + ((y - v_begin) * stride_v);
+                    region.ForEachSpan(
+                        y, cell_u0, cell_u1,
+                        [&](std::uint64_t first, std::uint64_t last, const std::uint8_t* selected,
+                            std::uint64_t mask_step) {
+                            // A span whose every pixel is selected -- a run, or a region
+                            // that is its whole box -- takes the loop with no test per pixel.
+                            const float* pixels = row + ((first - u_begin) * stride_u);
+                            const std::uint64_t count = last - first;
                             if (stride_u == 1) {
-                                AccumulateRow<true, false>(span, 1, last - first, nullptr, 1,
-                                                           totals);
+                                if (selected == nullptr) {
+                                    AccumulateRow<true, false>(pixels, 1, count, nullptr, 1, totals);
+                                } else {
+                                    AccumulateRow<true, true>(pixels, 1, count, selected, mask_step, totals);
+                                }
+                            } else if (selected == nullptr) {
+                                AccumulateRow<false, false>(pixels, stride_u, count, nullptr, 1, totals);
                             } else {
-                                AccumulateRow<false, false>(span, stride_u, last - first,
-                                                            nullptr, 1, totals);
+                                AccumulateRow<false, true>(pixels, stride_u, count, selected, mask_step, totals);
                             }
-                        }
-                    } else {
-                        const float* pixel_row =
-                            plane + ((y - v_begin) * stride_v) + ((ru0 - u_begin) * stride_u);
-                        const std::uint8_t* selected =
-                            region.mask == nullptr
-                                ? nullptr
-                                : region.mask +
-                                      ((y - region.v_start) * region.mask_v_stride) +
-                                      ((ru0 - region.u_start) * region.mask_u_stride);
-                        const std::uint64_t run = ru1 - ru0;
-                        const std::uint64_t mask_step = region.mask_u_stride;
-                        if (stride_u == 1) {
-                            if (selected == nullptr) {
-                                AccumulateRow<true, false>(pixel_row, 1, run, nullptr, 1, totals);
-                            } else {
-                                AccumulateRow<true, true>(pixel_row, 1, run, selected, mask_step,
-                                                          totals);
-                            }
-                        } else if (selected == nullptr) {
-                            AccumulateRow<false, false>(pixel_row, stride_u, run, nullptr, 1,
-                                                        totals);
-                        } else {
-                            AccumulateRow<false, true>(pixel_row, stride_u, run, selected,
-                                                       mask_step, totals);
-                        }
-                    }
-
+                        });
                     partial.Fold(r, channel, totals);
                 }
             }
