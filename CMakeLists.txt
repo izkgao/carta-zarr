@@ -121,6 +121,20 @@ set_target_properties(carta_zarr PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR})
 
+# Hidden visibility covers what this library compiles, not the static libraries TensorStore brings,
+# which are linked in whole and would otherwise all be exported. The linker is told outright what to
+# export: carta::zarr and nothing else. See cmake/carta_zarr.map.
+if(APPLE)
+    set(CARTA_ZARR_EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/carta_zarr.exp")
+    target_link_options(carta_zarr PRIVATE "LINKER:-exported_symbols_list,${CARTA_ZARR_EXPORTS}")
+elseif(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD")
+    set(CARTA_ZARR_EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/carta_zarr.map")
+    target_link_options(carta_zarr PRIVATE "LINKER:--version-script=${CARTA_ZARR_EXPORTS}" "LINKER:--exclude-libs,ALL")
+endif()
+if(CARTA_ZARR_EXPORTS)
+    set_property(TARGET carta_zarr APPEND PROPERTY LINK_DEPENDS "${CARTA_ZARR_EXPORTS}")
+endif()
+
 install(TARGETS carta_zarr
     EXPORT CartaZarrTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -623,6 +637,15 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         else()
             message(STATUS "uv was not found; the zarr-bench generator tests are skipped")
         endif()
+    endif()
+
+    # The library exports its own API and none of what it links in statically. See cmake/carta_zarr.map.
+    if(CMAKE_NM AND (APPLE OR CMAKE_SYSTEM_NAME MATCHES "Linux|BSD"))
+        add_test(NAME carta-zarr-exports
+            COMMAND ${CMAKE_COMMAND}
+                "-DLIBRARY=$<TARGET_FILE:carta_zarr>"
+                "-DNM=${CMAKE_NM}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_exports.cmake")
     endif()
 
     if(CARTA_ZARR_BUILD_PACKAGE_TEST)
