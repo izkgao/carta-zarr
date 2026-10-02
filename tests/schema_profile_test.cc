@@ -719,6 +719,31 @@ void TestANodeThatWillNotParseIsDiagnosedNotRefused() {
     Require(size && size.value().bytes == 592, "an unparseable node left the dataset without a declared size");
 }
 
+// The dataset-level half of a codec that will not parse: the array is diagnosed, and the dataset
+// beside it is not. A numeric codec name used to throw past every per-node diagnostic and close the
+// store.
+void TestAnArrayWithAMalformedCodecIsDiagnosedNotRefused() {
+    auto nodes = CompleteStore();
+    nodes["JUNK"] = R"({"shape":[2],"data_type":"float32",)"
+                    R"("chunk_grid":{"name":"regular","configuration":{"chunk_shape":[2]}},)"
+                    R"("codecs":[{"name":"bytes"},{"name":17}],"zarr_format":3,"node_type":"array"})";
+
+    Require(Probe(nodes).kind == SchemaMatchKind::match, "a malformed codec refused a store whose image is fine");
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "the store holding a malformed codec failed to open");
+    const auto discovery = XradioProfile().Discover(store.value());
+    Require(static_cast<bool>(discovery), "discovery refused a store holding a malformed codec");
+    Require(OpenableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
+            "the image beside a malformed codec was not openable");
+    const auto& said = discovery.value().diagnostics;
+    Require(std::any_of(said.begin(), said.end(),
+                        [](const auto& diagnostic) {
+                            return diagnostic.node_path == "JUNK" &&
+                                   diagnostic.code == carta::zarr::DiagnosticCode::unreadable_array;
+                        }),
+            "the array with a malformed codec was not diagnosed as unreadable");
+}
+
 // The report latches: once a requirement is unmet, later ones are no-ops. A store with two faults
 // is therefore diagnosed once, by the first fault reached -- the behaviour a probe had when every
 // check returned early, now stated somewhere rather than emerging from the control flow.
@@ -1033,6 +1058,7 @@ int main() {
         TestAConsolidatedBlockThatMisnamesItsNodesIsRefused();
         TestTheInventorySaysWhatEachNodeIs();
         TestANodeThatWillNotParseIsDiagnosedNotRefused();
+        TestAnArrayWithAMalformedCodecIsDiagnosedNotRefused();
         TestADeclaredFlagIsBinding();
         TestADeclaredFlagThatCannotMaskClosesTheImageInTheListing();
         TestAnImageWithAnAxisBeyondTheFiveIsNotOpenable();

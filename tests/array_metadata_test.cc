@@ -134,6 +134,20 @@ void TestAShardingCodecWithAnUnusableChunkShapeIsRefused() {
     Require(!LayoutOf("").sharded, "an unsharded array should still be described");
 }
 
+// A codec named by something other than a string is a document that will not parse, and says so as
+// one. It used to throw out of the parse instead, from the lookup that matched codecs by name -- past
+// the per-node diagnostic, so one malformed array closed a dataset whose images were fine.
+void TestACodecNamedByANonStringIsRefused() {
+    const auto outer = RefusedDocument(R"([{"name":"bytes"},{"name":17}])");
+    Require(outer.code == ErrorCode::invalid_metadata, "a numeric codec name should be invalid metadata");
+    Require(outer.node_path == "SKY", "and the refusal should name the array");
+
+    const auto inner = RefusedDocument(
+        R"([{"name":"sharding_indexed","configuration":{"chunk_shape":[2,2],"codecs":[{"name":null}]}}])");
+    Require(inner.code == ErrorCode::invalid_metadata,
+            "a codec inside the shard named by a non-string should be invalid metadata");
+}
+
 }  // namespace
 
 int main() {
@@ -143,6 +157,7 @@ int main() {
         TestASharedArrayReportsTheChunksInsideTheShard();
         TestTheOuterCompressorIsNotUsedForShardedChunks();
         TestAShardingCodecWithAnUnusableChunkShapeIsRefused();
+        TestACodecNamedByANonStringIsRefused();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "array metadata test failed: %s\n", error.what());
         return 1;
