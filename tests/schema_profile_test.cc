@@ -902,6 +902,24 @@ void TestAmbiguousFlagsSelectNone() {
     Require(single_diagnostics.empty(), "one matching flag produced an ambiguity diagnostic");
 }
 
+// A root that says its consolidated metadata is null has none, which is how zarr-python reads it: it
+// opens the hierarchy by listing, as a root without the member would. It used to be refused as a
+// malformed block, closing a store whose every node was fine.
+void TestANullConsolidatedBlockIsNoConsolidation() {
+    auto nodes = CompleteStore();
+    auto root = RootGroup();
+    root.insert(root.size() - 1, ",\"consolidated_metadata\":null");
+    nodes[""] = root;
+
+    auto store = Open(nodes);
+    Require(static_cast<bool>(store), "a root with null consolidated metadata was refused");
+    Require(Probe(nodes).kind == SchemaMatchKind::match, "a store with null consolidated metadata was not matched");
+    const auto discovery = XradioProfile().Discover(store.value());
+    Require(static_cast<bool>(discovery) &&
+                OpenableImageIds(discovery.value().images) == std::vector<std::string>{"SKY"},
+            "the image of a store with null consolidated metadata was not found by listing");
+}
+
 void TestStoreRejections() {
     const auto no_root = Open({{"SKY", SkyArray()}});
     Require(!no_root && no_root.error().code == ErrorCode::not_zarr,
@@ -1064,6 +1082,7 @@ int main() {
         TestAnImageWithAnAxisBeyondTheFiveIsNotOpenable();
         TestAmbiguousFlagsSelectNone();
         TestStoreRejections();
+        TestANullConsolidatedBlockIsNoConsolidation();
         TestSizeFallsBackWhenTheStoreCannotBeMeasured();
         TestSizeRefusesAStoreWithNoArrays();
         TestADescriptionIsBuiltFromTheValuesItIsGiven();
