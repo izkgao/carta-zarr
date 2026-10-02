@@ -81,6 +81,7 @@ CLAUDE.md
 # Working documents stay local. The ADRs, the design draft and the compatibility baseline are the
 # record a reader of this repository needs; the rest are research drafts, a measurement log and a
 # rendered atlas, none of them finished and none of them in the project's language.
+docs/archive/
 docs/implementation-plan.md
 docs/read-api.md
 docs/sidecar.md
