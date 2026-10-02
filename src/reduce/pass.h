@@ -39,7 +39,7 @@ namespace carta::zarr::internal {
  * wants planes loops over `channel_count` itself, which costs it nothing.
  */
 struct Slab {
-    // Where this slab starts in the channel range this RunPass was given, which is what a visitor
+    // Where this slab starts in the channel range its walk was given, which is what a visitor
     // accumulating into a block of its own indexes by. Set by the walk, not by the reader: the
     // reader is given an absolute index and has nothing to measure a relative one against.
     BlockChannel first_channel;
@@ -62,7 +62,8 @@ inline void SampledRange(std::uint64_t begin, std::uint64_t end, std::uint64_t s
 }
 
 /**
- * Walks one spatial footprint along the spectrum, a slab at a time.
+ * Walks one spatial footprint along the spectrum, a slab at a time, and the whole plane as bands of
+ * them: what a Pass reads with, and nothing a reduction or a test reaches past the Pass for.
  *
  * Which footprints to visit is not the walk's. A whole-plane pass bands the plane itself; a
  * reduction's come from its occupancy, which cuts the chunk runs its regions occupy -- see
@@ -74,22 +75,29 @@ inline void SampledRange(std::uint64_t begin, std::uint64_t end, std::uint64_t s
  * with the subtlety intact in both copies: `reads_done` guards the report so that a footprint taken
  * in a single read still reports once at the end rather than before it starts.
  *
- * `reads_done` and `chunks_done` are the caller's because their spans are: a reduction resets them
- * per emitted block, a whole-plane pass keeps them for the call.
+ * `reads_done` and `chunks_done` are the Pass's, because their spans are: a block resets them, a
+ * whole run keeps them. They used to be every reduction's, passed down by reference, and the rule
+ * about them was written in a comment at each place that did.
  *
  * `visit` is a template parameter and must not become a `std::function`: the per-pixel loop inlines
  * through it, and 54731c1 measured a quarter of a reduction riding on that. ADR 0005. `report` is
  * one call per slab, which is the same footing `PixelSource` stands on.
  *
- * Holds the buffers, so a walk allocates once rather than once per footprint.
+ * Holds the buffers, so a pass allocates once rather than once per footprint or per block.
+ *
+ * Its interface is protected, and a Pass is the one thing that derives from it: a class of its own
+ * rather than a member of Pass because the read itself is out of line in pass_read.cc, and Pass is a
+ * template.
  */
 class SlabWalk {
 public:
-    SlabWalk(const PixelSource& source, const PassPlan& plan, const ReadOptions& options)
-        : _source(source), _plan(plan), _options(options) {}
-
     SlabWalk(const SlabWalk&) = delete;
     SlabWalk& operator=(const SlabWalk&) = delete;
+
+protected:
+    SlabWalk(const PixelSource& source, const PassPlan& plan, const ReadOptions& options)
+        : _source(source), _plan(plan), _options(options) {}
+    ~SlabWalk() = default;
 
     template <typename Report, typename Visit>
     Result<void> Over(const SlabFootprint& footprint, SelectionChannel begin, SelectionChannel end,
@@ -141,6 +149,54 @@ public:
         return {};
     }
 
+    /**
+     * Visit every plane of the channels [begin, end), a band of chunk rows at a time -- and a band in
+     * pieces along its rows when one row is wider than a read may decode.
+     *
+     * A piece sampling steps over entirely is not read, but its chunks are counted as it is passed,
+     * so that what `before_read` is told reaches the whole.
+     */
+    template <typename BeforeRead, typename Visit>
+    Result<void> OverBands(SelectionChannel begin, SelectionChannel end, std::uint64_t& reads_done,
+                           std::uint64_t& chunks_done, BeforeRead&& before_read, Visit&& visit) {
+        const std::uint64_t row_chunks = std::max<std::uint64_t>(1, ((_plan.u_length - 1) / _plan.chunk_u) + 1);
+        for (std::uint64_t v_begin = 0; v_begin < _plan.v_length;) {
+            const std::uint64_t v_end = std::min(_plan.v_length, v_begin + (_plan.band_rows * _plan.chunk_v));
+            const std::uint64_t band_rows = (((v_end - v_begin) - 1) / _plan.chunk_v) + 1;
+            SlabFootprint band;
+            SampledRange(v_begin, v_end, _plan.sample, band.v_start, band.v_count);
+            if (band.v_count == 0) {
+                chunks_done += row_chunks * band_rows * _plan.ChunksTouched(begin, end);
+                v_begin = v_end;
+                continue;
+            }
+            band.u_stride = _plan.sample;
+            band.v_stride = _plan.sample;
+
+            // A chunk row wider than a read is read in pieces along it, as Occupancy::Footprints
+            // reads a run: band_rows floors at one, so without this the smallest read is a whole
+            // chunk row, however many budgets wide that is.
+            const std::uint64_t segment_chunks = _plan.UnitsAffordable(band_rows);
+            for (std::uint64_t first = 0; first < row_chunks;) {
+                const std::uint64_t width = std::min(segment_chunks, row_chunks - first);
+                SlabFootprint segment = band;
+                SampledRange(first * _plan.chunk_u, std::min(_plan.u_length, (first + width) * _plan.chunk_u),
+                             _plan.sample, segment.u_start, segment.u_count);
+                segment.chunks = width * band_rows;
+                first += width;
+                if (segment.u_count == 0) {
+                    chunks_done += segment.chunks * _plan.ChunksTouched(begin, end);
+                    continue;
+                }
+                if (auto walked = Over(segment, begin, end, reads_done, chunks_done, before_read, visit); !walked) {
+                    return walked.error();
+                }
+            }
+            v_begin = v_end;
+        }
+        return {};
+    }
+
 private:
     // What a slab is asked for and read into, and the read itself: the walk's own, and nothing a
     // caller of it names. They were declared beside it for anyone to use, and only it ever did.
@@ -185,69 +241,6 @@ private:
     SlabBuffers _buffers;
 };
 
-/**
- * Visit every plane of one channel range, a band of chunk rows at a time -- and a band in pieces
- * along its rows when one row is wider than a read may decode.
- *
- * `before_read` runs before each read after the first of the range, which is where a caller reports
- * what it has or decides to stop. `visit` receives one `Slab`.
- *
- * Both are template parameters and neither may become a `std::function`: the per-pixel loop inlines
- * through `visit`, and 54731c1 measured a quarter of a reduction riding on that. ADR 0005.
- */
-template <typename BeforeRead, typename Visit>
-Result<void> WalkPlaneBands(SlabWalk& walk, const PassPlan& plan, SelectionChannel begin, SelectionChannel end,
-                            std::uint64_t& reads_done, std::uint64_t& chunks_done, BeforeRead&& before_read,
-                            Visit&& visit) {
-    const std::uint64_t row_chunks = std::max<std::uint64_t>(1, ((plan.u_length - 1) / plan.chunk_u) + 1);
-    for (std::uint64_t v_begin = 0; v_begin < plan.v_length;) {
-        const std::uint64_t v_end = std::min(plan.v_length, v_begin + (plan.band_rows * plan.chunk_v));
-        const std::uint64_t band_rows = (((v_end - v_begin) - 1) / plan.chunk_v) + 1;
-        SlabFootprint band;
-        SampledRange(v_begin, v_end, plan.sample, band.v_start, band.v_count);
-        if (band.v_count == 0) {
-            chunks_done += row_chunks * band_rows * plan.ChunksTouched(begin, end);
-            v_begin = v_end;
-            continue;
-        }
-        band.u_stride = plan.sample;
-        band.v_stride = plan.sample;
-
-        // A chunk row wider than a read is read in pieces along it, as Occupancy::Footprints reads a
-        // run: band_rows floors at one, so without this the smallest read is a whole chunk row,
-        // however many budgets wide that is.
-        const std::uint64_t segment_chunks = plan.UnitsAffordable(band_rows);
-        for (std::uint64_t first = 0; first < row_chunks;) {
-            const std::uint64_t width = std::min(segment_chunks, row_chunks - first);
-            SlabFootprint segment = band;
-            SampledRange(first * plan.chunk_u, std::min(plan.u_length, (first + width) * plan.chunk_u), plan.sample,
-                         segment.u_start, segment.u_count);
-            segment.chunks = width * band_rows;
-            first += width;
-            if (segment.u_count == 0) {
-                chunks_done += segment.chunks * plan.ChunksTouched(begin, end);
-                continue;
-            }
-            if (auto walked = walk.Over(segment, begin, end, reads_done, chunks_done, before_read, visit);
-                !walked) {
-                return walked.error();
-            }
-        }
-        v_begin = v_end;
-    }
-    return {};
-}
-
-template <typename BeforeRead, typename Visit>
-Result<void> RunPass(const PixelSource& source, const PassPlan& plan, const ReadOptions& options,
-                     SelectionChannel begin, SelectionChannel end, std::uint64_t& chunks_done,
-                     BeforeRead&& before_read, Visit&& visit) {
-    SlabWalk walk(source, plan, options);
-    std::uint64_t reads_done = 0;
-    return WalkPlaneBands(walk, plan, begin, end, reads_done, chunks_done, std::forward<BeforeRead>(before_read),
-                          std::forward<Visit>(visit));
-}
-
 // What a pass walks, spatially: the whole plane, in bands of chunk rows.
 struct PlaneBands {};
 
@@ -282,7 +275,7 @@ struct FootprintsOf {
  * inlines through `visit`, and 54731c1 measured a quarter of a reduction riding on that. ADR 0005.
  */
 template <typename Shape>
-class Pass {
+class Pass : private SlabWalk {
 public:
     Pass(const Pass&) = delete;
     Pass& operator=(const Pass&) = delete;
@@ -336,8 +329,9 @@ public:
                 return {};
             };
 
-            if (auto walked = Walk(begin, end, reads_done, chunks_done,
-                                   [&](std::uint64_t) -> Result<void> { return deliver(false); }, visit);
+            if (auto walked = Walk(
+                    begin, end, reads_done, chunks_done, [&](std::uint64_t) -> Result<void> { return deliver(false); },
+                    visit);
                 !walked) {
                 return walked.error();
             }
@@ -378,22 +372,20 @@ public:
 private:
     template <typename Footprints>
     friend Pass<FootprintsOf<Footprints>> PassOverFootprints(const PixelSource& source, const PassPlan& plan,
-                                                              const ReadOptions& options, const Footprints& footprints,
-                                                              std::string cancelled);
+                                                             const ReadOptions& options, const Footprints& footprints,
+                                                             std::string cancelled);
     friend Pass<PlaneBands> PassOverPlane(const PixelSource& source, const PassPlan& plan, const ReadOptions& options,
                                           std::string cancelled);
 
     Pass(const PixelSource& source, const PassPlan& plan, const ReadOptions& options, Shape shape,
          std::uint64_t layer_chunks, std::string cancelled)
-        : _plan(plan),
-          _walk(source, plan, options),
+        : SlabWalk(source, plan, options),
+          _plan(plan),
           _shape(shape),
           _layer_chunks(layer_chunks),
           _cancelled(std::move(cancelled)) {}
 
-    Error Cancelled() const {
-        return Error{ErrorCode::cancelled, _cancelled, _plan.descriptor->id};
-    }
+    Error Cancelled() const { return Error{ErrorCode::cancelled, _cancelled, _plan.descriptor->id}; }
 
     // The channels [begin, end) of every footprint of the shape. The footprints of one walk share
     // `reads_done`, so a walk taken in a single read still reports once -- at the end, through its
@@ -402,11 +394,11 @@ private:
     Result<void> Walk(SelectionChannel begin, SelectionChannel end, std::uint64_t& reads_done,
                       std::uint64_t& chunks_done, Report&& report, Visit& visit) {
         if constexpr (std::is_same_v<Shape, PlaneBands>) {
-            return WalkPlaneBands(_walk, _plan, begin, end, reads_done, chunks_done, report, visit);
+            return OverBands(begin, end, reads_done, chunks_done, report, visit);
         } else {
             for (const auto& footprint : *_shape.footprints) {
-                if (auto walked = _walk.Over(footprint.slab, begin, end, reads_done, chunks_done, report,
-                                             [&](const Slab& slab) { visit(footprint, slab); });
+                if (auto walked = Over(footprint.slab, begin, end, reads_done, chunks_done, report,
+                                       [&](const Slab& slab) { visit(footprint, slab); });
                     !walked) {
                     return walked.error();
                 }
@@ -416,7 +408,6 @@ private:
     }
 
     const PassPlan& _plan;
-    SlabWalk _walk;
     Shape _shape;
     // What one spectral layer of the shape occupies, unclamped: zero for a region set occupying
     // nothing. See InBlocks.

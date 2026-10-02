@@ -434,14 +434,6 @@ if(CARTA_ZARR_BUILD_TESTS AND BUILD_TESTING)
         SOURCES tests/pass_test.cc ${CARTA_ZARR_PASS_SOURCES}
         LIBRARIES nlohmann_json::nlohmann_json)
 
-    # What a reduction decides about its blocks, before it reads anything. Compiled against pass.cc
-    # alone, and the walk it drives reads nothing: where a block is cut, what a part-filled one
-    # reports, and what a sink saying no means are all answerable with no pixels.
-    carta_zarr_add_test(carta_zarr_block_emit_tests INTERNAL
-        TEST_NAME carta-zarr-block-emit
-        SOURCES tests/block_emit_test.cc src/reduce/pass.cc
-        LIBRARIES nlohmann_json::nlohmann_json)
-
     # The layout a spectral reduction accumulates in, and the block it hands over. Header-only and
     # compiled against nothing: which slot a statistic lands in and what an untouched extremum is
     # reported as are questions about doubles in a buffer, not about pixels.

@@ -185,7 +185,8 @@ Result<void> ReduceSpectral(const ReducibleImage& image, const SpectralReduceReq
     // Emitting only at the end instead, which is what a zero used to mean, is silent for as long as
     // the whole reduction takes. One layer of a 7763x4742 image is 160 MiB and 70 ms; a thousand
     // channels of it is a minute of work with no partial answer and nowhere to cancel.
-    auto pass = PassOverFootprints(source, plan, options, footprints, "The spectral reduction was cancelled by its sink");
+    auto pass =
+        PassOverFootprints(source, plan, options, footprints, "The spectral reduction was cancelled by its sink");
 
     StatisticSlots accumulator;
     // One private accumulator per task, reused across slabs. See the dispatch below. "Partials" as
@@ -200,10 +201,10 @@ Result<void> ReduceSpectral(const ReducibleImage& image, const SpectralReduceReq
     // Named rather than written into the call below, for the reason plane_histogram.cc gives for
     // bin_slab, and this one carries another lambda inside it.
     //
-    // The pass hands it the footprint each slab was read over. Its bounds arrive as an argument and are unpacked into the names the body already
-    // used, so that the accumulation is the same text it has been since it stopped doing its own
-    // reading. It stays a lambda passed as a template parameter, never a std::function: the
-    // per-pixel loop inlines through it. ADR 0005.
+    // The pass hands it the footprint each slab was read over. Its bounds arrive as an argument and
+    // are unpacked into the names the body already used, so that the accumulation is the same text
+    // it has been since it stopped doing its own reading. It stays a lambda passed as a template
+    // parameter, never a std::function: the per-pixel loop inlines through it. ADR 0005.
     const auto accumulate_slab = [&](const OccupiedFootprint& footprint, const Slab& slab) {
         const std::uint64_t chunk_cv_begin = footprint.chunk_cv_begin;
         const std::uint64_t chunk_cv_end = footprint.chunk_cv_end;

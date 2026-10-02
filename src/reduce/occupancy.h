@@ -131,6 +131,9 @@ public:
 
     // The chunks one spectral layer of the whole region set occupies. Zero when the regions select
     // nothing at all, which a mask of zeroes does.
+    //
+    // The same number as the chunks of every footprint added up, which is how a pass over them counts
+    // it: occupancy_test holds the two equal.
     std::uint64_t LayerChunks() const noexcept {
         return _layer_chunks;
     }

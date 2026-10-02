@@ -14,11 +14,10 @@
 //
 // None of it needs a store, a transport or a fixture, which is the point.
 
-#include "axis_map.h"
 #include "reduce/pass.h"
 
+#include "axis_map.h"
 #include "support/check.h"
-
 #include "support/synthetic_pixel_source.h"
 
 #include <chrono>
@@ -26,6 +25,7 @@
 #include <cstdio>
 #include <exception>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -36,11 +36,13 @@ using carta::zarr::Range;
 using carta::zarr::ReadOptions;
 using carta::zarr::internal::CheckedPlanes;
 using carta::zarr::internal::MapAxes;
+using carta::zarr::internal::PassOverFootprints;
+using carta::zarr::internal::PassOverPlane;
 using carta::zarr::internal::PassPlan;
 using carta::zarr::internal::PlanPass;
 using carta::zarr::internal::SelectionChannel;
-using carta::zarr::internal::RunPass;
 using carta::zarr::internal::Slab;
+using carta::zarr::internal::SlabFootprint;
 using carta::zarr::testing::SyntheticPixelSource;
 
 using carta::zarr::testing::Require;
@@ -89,6 +91,16 @@ PassPlan Plan(const ImageDescriptor& descriptor, const ChunkGeometry& geometry, 
     const auto planes = CheckedPlanes::Of(descriptor, map.value(), {spectral, 0, 0});
     Require(static_cast<bool>(planes), "the spectral range does not fit this image");
     return PlanPass(descriptor, geometry, map.value(), planes.value(), sample, options);
+}
+
+constexpr const char* kCancelled = "The test's pass was cancelled";
+
+// The whole selection as one run, with nobody asking how far along it is.
+template <typename Visit>
+carta::zarr::Result<void> WalkWhole(const SyntheticPixelSource& source, const PassPlan& plan,
+                                    const ReadOptions& options, Visit&& visit) {
+    auto pass = PassOverPlane(source, plan, options, kCancelled);
+    return pass.Whole([](double) { return true; }, visit);
 }
 
 // Which spatial axis the pass walks along is the store's decision, not the image's. Reading a plane
@@ -263,25 +275,21 @@ struct Walked {
     std::uint64_t slabs = 0;
 };
 
-Walked WalkEverything(const SyntheticPixelSource& source, const PassPlan& plan, const ReadOptions& options,
-                      std::uint64_t channels) {
+Walked WalkEverything(const SyntheticPixelSource& source, const PassPlan& plan, const ReadOptions& options) {
     Walked walked;
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{channels}, chunks_done, [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
-        [&](const Slab& slab) {
-            ++walked.slabs;
-            for (std::uint64_t z = 0; z < slab.channel_count; ++z) {
-                const float* plane = slab.pixels + (z * slab.stride_z);
-                for (std::uint64_t v = 0; v < slab.v_count; ++v) {
-                    const float* row = plane + (v * slab.stride_v);
-                    for (std::uint64_t u = 0; u < slab.u_count; ++u) {
-                        walked.sum += row[u * slab.stride_u];
-                        ++walked.pixels;
-                    }
+    const auto outcome = WalkWhole(source, plan, options, [&](const Slab& slab) {
+        ++walked.slabs;
+        for (std::uint64_t z = 0; z < slab.channel_count; ++z) {
+            const float* plane = slab.pixels + (z * slab.stride_z);
+            for (std::uint64_t v = 0; v < slab.v_count; ++v) {
+                const float* row = plane + (v * slab.stride_v);
+                for (std::uint64_t u = 0; u < slab.u_count; ++u) {
+                    walked.sum += row[u * slab.stride_u];
+                    ++walked.pixels;
                 }
             }
-        });
+        }
+    });
     Require(static_cast<bool>(outcome), "the pass failed");
     return walked;
 }
@@ -298,7 +306,7 @@ void TestEachChunkIsReadOnce() {
     const auto plan = Plan(image, geometry, Range{0, 32, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
 
-    const auto walked = WalkEverything(source, plan, options, 32);
+    const auto walked = WalkEverything(source, plan, options);
     Require(walked.slabs > 1, "this budget should have split the walk; if it did not, raise the image size");
     Require(source.most_hits_on_one_chunk() == 1,
             "a pass decodes each chunk once -- a slab that ends inside a chunk makes one decode serve "
@@ -316,7 +324,7 @@ void TestThePassVisitsEveryPixelOnce() {
     const auto plan = Plan(image, geometry, Range{0, 8, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
 
-    const auto walked = WalkEverything(source, plan, options, 8);
+    const auto walked = WalkEverything(source, plan, options);
     Require(walked.pixels == 64ULL * 40ULL * 8ULL, "every pixel of the selection, once");
 
     double expected = 0.0;
@@ -345,20 +353,17 @@ void TestAFlaggedPixelArrivesAsNaN() {
 
     std::uint64_t good = 0;
     std::uint64_t bad = 0;
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{4}, chunks_done, [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
-        [&](const Slab& slab) {
-            for (std::uint64_t z = 0; z < slab.channel_count; ++z) {
-                const float* plane = slab.pixels + (z * slab.stride_z);
-                for (std::uint64_t v = 0; v < slab.v_count; ++v) {
-                    const float* row = plane + (v * slab.stride_v);
-                    for (std::uint64_t u = 0; u < slab.u_count; ++u) {
-                        std::isnan(row[u * slab.stride_u]) ? ++bad : ++good;
-                    }
+    const auto outcome = WalkWhole(source, plan, options, [&](const Slab& slab) {
+        for (std::uint64_t z = 0; z < slab.channel_count; ++z) {
+            const float* plane = slab.pixels + (z * slab.stride_z);
+            for (std::uint64_t v = 0; v < slab.v_count; ++v) {
+                const float* row = plane + (v * slab.stride_v);
+                for (std::uint64_t u = 0; u < slab.u_count; ++u) {
+                    std::isnan(row[u * slab.stride_u]) ? ++bad : ++good;
                 }
             }
-        });
+        }
+    });
     Require(static_cast<bool>(outcome), "the pass failed");
     Require(source.mask_reads() == source.pixel_reads(), "a masked pass reads a flag for every slab");
     // l in [0, 32) has eleven multiples of three.
@@ -378,10 +383,7 @@ void TestCancellationStopsThePass() {
     const auto plan = Plan(image, geometry, Range{0, 16, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
 
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{16}, chunks_done, [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
-        [&](const Slab&) { ++reads; });
+    const auto outcome = WalkWhole(source, plan, options, [&](const Slab&) { ++reads; });
     Require(!outcome && outcome.error().code == carta::zarr::ErrorCode::cancelled,
             "a cancelled pass reports cancelled");
     Require(reads == 2, "and stops at the read after the one that asked");
@@ -395,10 +397,7 @@ void TestAnExpiredDeadlineStopsThePass() {
     const auto plan = Plan(image, geometry, Range{0, 8, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
 
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{8}, chunks_done, [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
-        [](const Slab&) {});
+    const auto outcome = WalkWhole(source, plan, options, [](const Slab&) {});
     Require(!outcome && outcome.error().code == carta::zarr::ErrorCode::cancelled,
             "a pass past its deadline reports cancelled before reading anything");
     Require(source.pixel_reads() == 0, "and does not read");
@@ -415,10 +414,7 @@ void TestAReadFailureStopsThePass() {
     source.fail_read(2, carta::zarr::ErrorCode::io_error);
 
     int visits = 0;
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{8}, chunks_done, [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
-        [&](const Slab&) { ++visits; });
+    const auto outcome = WalkWhole(source, plan, options, [&](const Slab&) { ++visits; });
     Require(!outcome && outcome.error().code == carta::zarr::ErrorCode::io_error,
             "the source's error is the pass's error");
     Require(visits == 1, "and nothing is visited after it");
@@ -438,10 +434,7 @@ void TestALargePlaneSplitsIntoBands() {
     source.set_constant(1.0F);
 
     std::uint64_t slabs = 0;
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{4}, chunks_done,
-        [](std::uint64_t) -> carta::zarr::Result<void> { return {}; }, [&](const Slab&) { ++slabs; });
+    const auto outcome = WalkWhole(source, plan, options, [&](const Slab&) { ++slabs; });
     Require(static_cast<bool>(outcome), "the pass failed on a large plane");
     Require(source.elements_read() == 4096ULL * 4096ULL * 4ULL, "every pixel of a sixty-seven megapixel cube");
     Require(slabs > 8, "and it took many reads to do it");
@@ -462,7 +455,7 @@ void TestAChunkRowWiderThanTheBudgetIsSplitAlongIt() {
     Require(plan.u_length == 64, "this test needs u along the wide axis");
     SyntheticPixelSource source(image, geometry, Encoded);
 
-    const auto walked = WalkEverything(source, plan, options, 2);
+    const auto walked = WalkEverything(source, plan, options);
     for (const auto size : source.pixel_destinations()) {
         Require(size <= 2U * 8U * 8U, "a read held more than its budget's two chunks");
     }
@@ -482,16 +475,327 @@ void TestASampledRowSplitsAlongItToo() {
     SyntheticPixelSource source(image, geometry, Encoded);
 
     Walked walked;
-    std::uint64_t chunks_done = 0;
-    const auto outcome = RunPass(
-        source, plan, options, SelectionChannel{}, SelectionChannel{1}, chunks_done,
-        [](std::uint64_t) -> carta::zarr::Result<void> { return {}; },
+    std::vector<double> reported;
+    auto pass = PassOverPlane(source, plan, options, kCancelled);
+    const auto outcome = pass.Whole(
+        [&](double fraction) {
+            reported.push_back(fraction);
+            return true;
+        },
         [&](const Slab& slab) { walked.pixels += slab.u_count * slab.v_count; });
     Require(static_cast<bool>(outcome), "the pass failed");
     // u = 0, 16, 32, 48 and v = 0: one pixel in every other chunk along the row.
     Require(walked.pixels == 4, "every sixteenth pixel each way");
     Require(source.pixel_reads() == 4, "and only the pieces holding one are read");
-    Require(chunks_done == plan.layer_chunks, "while every chunk of the plane is counted");
+    // Sixteen chunks to the plane: the row of eight read in pieces, every other one stepped over,
+    // and the second row stepped over whole. Each read after the first is told what came before it,
+    // the pieces stepped over included -- and the second row, counted after the last read, is never
+    // told at all.
+    Require(reported == std::vector<double>{2.0 / 16, 4.0 / 16, 6.0 / 16},
+            "the pieces stepped over were not counted as they were passed");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The blocks a pass cuts, and what it says as it fills them.
+//
+// These were the block emitter's, driven by a walk that read nothing and only said how far it got,
+// because the emitter and the walk were two things and the caller joined them. The pass is one
+// thing now, so they read real pixels -- and can say what the emitter's could not: that the
+// channels a block's walk reads are the channels the block is handed over as.
+
+// One hand-over, as the sink saw it.
+struct Handed {
+    SelectionChannel first_channel;
+    std::uint64_t length = 0;
+    bool complete = false;
+    double completeness = 0.0;
+};
+
+// A footprint as a region set's occupancy would cut it. The pass asks nothing of one but its slab,
+// and hands it back to the visitor beside every read made over it.
+struct Footprint {
+    SlabFootprint slab;
+    int which = 0;
+};
+
+// The image channel a slab's first pixel came from, which Encoded writes into it.
+std::uint64_t ChannelOf(const Slab& slab, std::uint64_t z) {
+    return static_cast<std::uint64_t>(slab.pixels[z * slab.stride_z] / 1.0e6F);
+}
+
+// A block is never cut inside a spectral chunk, however small a block the caller asks for: a decode
+// serving two blocks would split one read's results across them. So a hint of one channel against a
+// chunk four deep still emits blocks of four.
+//
+// And what a block's walk reads is the block it is handed over as: a later block's slab starts at
+// zero, counted from the block, and holds that block's channels rather than the first block's --
+// which is e97066f, where every block after the first re-read the first one's.
+void TestBlocksAreCutOnChunkBoundaries() {
+    const auto image = MakeImage(64, 64, 32);
+    const auto geometry = MakeGeometry(64, 64, 4, AxisRole::spatial_y);
+    const ReadOptions options;
+    const auto plan = Plan(image, geometry, Range{0, 32, 1}, options);
+    SyntheticPixelSource source(image, geometry, Encoded);
+
+    std::vector<Handed> handed;
+    std::vector<std::uint64_t> relative;
+    std::vector<std::uint64_t> read_channels;
+    auto pass = PassOverPlane(source, plan, options, kCancelled);
+    const auto outcome = pass.InBlocks(
+        sizeof(double), 1, [](std::uint64_t) {},
+        [&](const Slab& slab) {
+            relative.push_back(slab.first_channel.index);
+            read_channels.push_back(ChannelOf(slab, 0));
+        },
+        [&](SelectionChannel first, std::uint64_t length, bool complete, double completeness) {
+            handed.push_back({first, length, complete, completeness});
+            return true;
+        });
+    Require(static_cast<bool>(outcome), "an uncancelled pass should succeed");
+
+    Require(handed.size() == 8,
+            "32 channels in blocks of a 4-deep chunk is eight blocks, not " + std::to_string(handed.size()));
+    Require(read_channels.size() == handed.size(), "every block should have been read in one slab");
+    SelectionChannel expected{};
+    for (std::size_t i = 0; i < handed.size(); ++i) {
+        Require(handed.at(i).first_channel == expected,
+                "block " + std::to_string(i) + " should start at " + std::to_string(expected.index));
+        Require(handed.at(i).length == 4, "block " + std::to_string(i) + " should hold four channels");
+        Require(handed.at(i).complete && handed.at(i).completeness == 1.0,
+                "a block read in one slab is handed over once, finished");
+        Require(relative.at(i) == 0, "a slab's first channel is counted from its block");
+        Require(read_channels.at(i) == expected.index, "block " + std::to_string(i) + " read channel " +
+                                                           std::to_string(read_channels.at(i)) +
+                                                           " rather than its own first");
+        expected = expected + 4U;
+    }
+    Require(expected == SelectionChannel{32}, "the blocks should tile the selection");
+}
+
+// A 64 x 64 plane of 16 x 16 chunks is a layer of sixteen, eight channels deep in one chunk, under a
+// budget of four chunks: one block, read as four bands of one chunk row each.
+PassPlan FourBandsOfOneBlock(const ImageDescriptor& image, const ChunkGeometry& geometry, ReadOptions& options) {
+    options.read_budget_bytes = 4 * 16 * 16 * 8 * sizeof(float);
+    return Plan(image, geometry, Range{0, 8, 1}, options);
+}
+
+// A block whose walk takes more than one read is handed over as it fills, before every read after
+// its first, and what it says about itself is the fraction of its own chunks that are in it --
+// counted in the layer the emit budget was spent against, which is the same number for both.
+void TestAPartFilledBlockReportsItsOwnChunks() {
+    const auto image = MakeImage(64, 64, 8);
+    const auto geometry = MakeGeometry(16, 16, 8, AxisRole::spatial_y);
+    ReadOptions options;
+    const auto plan = FourBandsOfOneBlock(image, geometry, options);
+    SyntheticPixelSource source(image, geometry, Encoded);
+
+    std::vector<Handed> handed;
+    auto pass = PassOverPlane(source, plan, options, kCancelled);
+    const auto outcome = pass.InBlocks(
+        sizeof(double), 0, [](std::uint64_t) {}, [](const Slab&) {},
+        [&](SelectionChannel first, std::uint64_t length, bool complete, double completeness) {
+            handed.push_back({first, length, complete, completeness});
+            return true;
+        });
+    Require(static_cast<bool>(outcome), "an uncancelled pass should succeed");
+    Require(source.pixel_reads() == 4, "four bands is four reads, not " + std::to_string(source.pixel_reads()));
+
+    Require(handed.size() == 4,
+            "three reports and one finish is four hand-overs, not " + std::to_string(handed.size()));
+    Require(!handed.at(0).complete && handed.at(0).completeness == 4.0 / 16.0, "four chunks of sixteen");
+    Require(!handed.at(1).complete && handed.at(1).completeness == 8.0 / 16.0, "eight chunks of sixteen");
+    Require(!handed.at(2).complete && handed.at(2).completeness == 12.0 / 16.0, "twelve chunks of sixteen");
+    Require(handed.at(3).complete && handed.at(3).completeness == 1.0,
+            "a finished block says one exactly, not sixteen sixteenths");
+    for (const auto& one : handed) {
+        Require(one.first_channel == SelectionChannel{} && one.length == 8, "every hand-over describes the same block");
+    }
+}
+
+// A sink saying no stops the pass there, whether it says it to a part-filled block or to a finished
+// one, and the pass reports cancelled -- with the message it was made with -- rather than a short
+// answer that looks complete.
+void TestASinkThatSaysNoCancels() {
+    // Refusing the first finished block: the second is never read.
+    {
+        const auto image = MakeImage(64, 64, 32);
+        const auto geometry = MakeGeometry(64, 64, 4, AxisRole::spatial_y);
+        const ReadOptions options;
+        const auto plan = Plan(image, geometry, Range{0, 32, 1}, options);
+        SyntheticPixelSource source(image, geometry, Encoded);
+        std::uint64_t hand_overs = 0;
+        auto pass = PassOverPlane(source, plan, options, kCancelled);
+        const auto outcome = pass.InBlocks(
+            sizeof(double), 1, [](std::uint64_t) {}, [](const Slab&) {},
+            [&](SelectionChannel, std::uint64_t, bool, double) {
+                ++hand_overs;
+                return false;
+            });
+        Require(!outcome, "a sink returning false should fail the pass");
+        Require(outcome.error().code == carta::zarr::ErrorCode::cancelled, "and it should report cancelled");
+        Require(outcome.error().message == kCancelled, "in the words the pass was made with");
+        Require(hand_overs == 1 && source.pixel_reads() == 1, "and it should stop at the first block");
+    }
+
+    // Refusing a part-filled one: the rest of that block is not read either.
+    {
+        const auto image = MakeImage(64, 64, 8);
+        const auto geometry = MakeGeometry(16, 16, 8, AxisRole::spatial_y);
+        ReadOptions options;
+        const auto plan = FourBandsOfOneBlock(image, geometry, options);
+        SyntheticPixelSource source(image, geometry, Encoded);
+        auto pass = PassOverPlane(source, plan, options, kCancelled);
+        const auto outcome = pass.InBlocks(
+            sizeof(double), 0, [](std::uint64_t) {}, [](const Slab&) {},
+            [](SelectionChannel, std::uint64_t, bool, double) { return false; });
+        Require(!outcome && outcome.error().code == carta::zarr::ErrorCode::cancelled,
+                "refusing a part-filled block should cancel too");
+        Require(source.pixel_reads() == 1, "and the rest of that block should not be read");
+    }
+}
+
+// A run is told how far along it is before every read after its first, and saying no there stops it
+// the same way, before the read it was asked about.
+void TestARunThatSaysNoCancels() {
+    const auto image = MakeImage(64, 64, 8);
+    const auto geometry = MakeGeometry(16, 16, 8, AxisRole::spatial_y);
+    ReadOptions options;
+    const auto plan = FourBandsOfOneBlock(image, geometry, options);
+    SyntheticPixelSource source(image, geometry, Encoded);
+
+    std::vector<double> reported;
+    auto pass = PassOverPlane(source, plan, options, kCancelled);
+    const auto outcome = pass.Whole(
+        [&](double fraction) {
+            reported.push_back(fraction);
+            return false;
+        },
+        [](const Slab&) {});
+    Require(!outcome && outcome.error().code == carta::zarr::ErrorCode::cancelled,
+            "a run told no should report cancelled");
+    Require(outcome.error().message == kCancelled, "in the words the pass was made with");
+    Require(reported == std::vector<double>{4.0 / 16.0}, "having been told once, after the first of four reads");
+    Require(source.pixel_reads() == 1, "and read nothing after it");
+}
+
+// The hint is the caller's and the chunk alignment is the plan's, but the emit budget is the
+// library's and it wins when a channel is expensive enough. Asked for the whole selection in one
+// block, a pass whose channels cost 64 MiB each gets one at a time.
+void TestTheBudgetLowersTheCallersHint() {
+    const auto image = MakeImage(64, 64, 64);
+    const auto geometry = MakeGeometry(64, 64, 1, AxisRole::spatial_y);
+    const ReadOptions options;
+    const auto plan = Plan(image, geometry, Range{0, 64, 1}, options);
+
+    const auto lengths = [&](std::size_t bytes_per_channel) {
+        SyntheticPixelSource source(image, geometry, Encoded);
+        source.set_constant(1.0F);
+        std::vector<std::uint64_t> handed;
+        auto pass = PassOverPlane(source, plan, options, kCancelled);
+        const auto outcome = pass.InBlocks(
+            bytes_per_channel, 64, [](std::uint64_t) {}, [](const Slab&) {},
+            [&](SelectionChannel, std::uint64_t length, bool, double) {
+                handed.push_back(length);
+                return true;
+            });
+        Require(static_cast<bool>(outcome), "an uncancelled pass should succeed");
+        return handed;
+    };
+    Require(lengths(sizeof(double)) == std::vector<std::uint64_t>{64}, "a cheap channel takes the hint as given");
+    const auto expensive = lengths(64U << 20U);
+    Require(expensive.size() == 64 && expensive.front() == 1,
+            "a channel costing 64 MiB should be emitted one at a time, not " + std::to_string(expensive.front()));
+}
+
+// The footprints of one block share its count of reads: a block made of two footprints, each taken
+// in a single read, is handed over once between them and once finished -- not once per footprint
+// -- and the fraction it reports is of the chunks the footprints occupy together.
+//
+// Each read is handed to the visitor beside the footprint it was read over.
+void TestTheFootprintsOfABlockShareItsReads() {
+    const auto image = MakeImage(64, 64, 4);
+    const auto geometry = MakeGeometry(32, 32, 4, AxisRole::spatial_y);
+    const ReadOptions options;
+    const auto plan = Plan(image, geometry, Range{0, 4, 1}, options);
+    SyntheticPixelSource source(image, geometry, Encoded);
+
+    // Opposite corners of a 2 x 2 grid of chunks. u is m, v is l, because m varies fastest.
+    std::vector<Footprint> footprints(2);
+    footprints.at(0).slab = SlabFootprint{0, 32, 1, 0, 32, 1, 1};
+    footprints.at(0).which = 0;
+    footprints.at(1).slab = SlabFootprint{32, 32, 1, 32, 32, 1, 1};
+    footprints.at(1).which = 1;
+
+    std::vector<Handed> handed;
+    std::vector<int> visited;
+    auto pass = PassOverFootprints(source, plan, options, footprints, kCancelled);
+    const auto outcome = pass.InBlocks(
+        sizeof(double), 0, [](std::uint64_t) {},
+        [&](const Footprint& footprint, const Slab& slab) {
+            visited.push_back(footprint.which);
+            const auto l = footprint.slab.v_start;
+            const auto m = footprint.slab.u_start;
+            Require(slab.pixels[0] == Encoded({l, m, 0, 0, 0}),
+                    "a slab arrived beside a footprint it was not read over");
+        },
+        [&](SelectionChannel first, std::uint64_t length, bool complete, double completeness) {
+            handed.push_back({first, length, complete, completeness});
+            return true;
+        });
+    Require(static_cast<bool>(outcome), "an uncancelled pass should succeed");
+    Require(visited == std::vector<int>{0, 1}, "each footprint read once, in order");
+    Require(handed.size() == 2, "one report between two reads and one finish, not " + std::to_string(handed.size()));
+    Require(!handed.at(0).complete && handed.at(0).completeness == 0.5,
+            "the first footprint is one chunk of the two they occupy, not of the plane's four");
+    Require(handed.at(1).complete && handed.at(1).completeness == 1.0, "and the block finishes complete");
+}
+
+// Footprints occupying no chunk at all -- what a mask of zeroes leaves a reduction with.
+//
+// Reachable from the public interface: a raster mask of zeroes selects nothing, which the request
+// checks do not refuse -- a caller with a region that this frame happens not to cover is asking a
+// legitimate question, and the answer is zero counts and no extrema.
+//
+// The layer is zero, and its two uses want opposite things about it. Spending the emit budget, zero
+// is the honest answer: there is nothing to read, so the whole selection is one block. As the
+// denominator of a part-filled block's completeness it must never be zero.
+void TestFootprintsOccupyingNothing() {
+    const auto image = MakeImage(64, 64, 64);
+    const auto geometry = MakeGeometry(64, 64, 1, AxisRole::spatial_y);
+    ReadOptions options;
+    // A budget of four chunks, so that a layer of one chunk is visibly cut and a layer of none is
+    // visibly not.
+    options.read_budget_bytes = 4 * 64 * 64 * sizeof(float);
+    const auto plan = Plan(image, geometry, Range{0, 64, 1}, options);
+
+    const auto blocks = [&](const std::vector<Footprint>& footprints, std::uint64_t& reads) {
+        SyntheticPixelSource source(image, geometry, Encoded);
+        source.set_constant(1.0F);
+        std::vector<Handed> handed;
+        auto pass = PassOverFootprints(source, plan, options, footprints, kCancelled);
+        const auto outcome = pass.InBlocks(
+            sizeof(double), 0, [](std::uint64_t) {}, [](const Footprint&, const Slab&) {},
+            [&](SelectionChannel first, std::uint64_t length, bool complete, double completeness) {
+                handed.push_back({first, length, complete, completeness});
+                return true;
+            });
+        Require(static_cast<bool>(outcome), "an uncancelled pass should succeed");
+        reads = source.pixel_reads();
+        return handed;
+    };
+
+    std::vector<Footprint> one(1);
+    one.at(0).slab = SlabFootprint{0, 64, 1, 0, 64, 1, 1};
+    std::uint64_t reads = 0;
+    const auto occupied = blocks(one, reads);
+    Require(occupied.front().length == 4, "a layer of one chunk should be cut by a four-chunk budget, not into " +
+                                              std::to_string(occupied.front().length));
+
+    const auto empty = blocks({}, reads);
+    Require(empty.size() == 1, "a single block should be handed over once, not " + std::to_string(empty.size()));
+    Require(empty.at(0).complete && empty.at(0).completeness == 1.0, "the one hand-over should be complete");
+    Require(empty.at(0).length == 64, "and should cover the whole selection");
+    Require(reads == 0, "having read nothing");
 }
 
 }  // namespace
@@ -516,6 +820,13 @@ int main() {
         TestALargePlaneSplitsIntoBands();
         TestAChunkRowWiderThanTheBudgetIsSplitAlongIt();
         TestASampledRowSplitsAlongItToo();
+        TestBlocksAreCutOnChunkBoundaries();
+        TestAPartFilledBlockReportsItsOwnChunks();
+        TestASinkThatSaysNoCancels();
+        TestARunThatSaysNoCancels();
+        TestTheBudgetLowersTheCallersHint();
+        TestTheFootprintsOfABlockShareItsReads();
+        TestFootprintsOccupyingNothing();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "pass test failed: %s\n", error.what());
         return 1;

@@ -9,7 +9,6 @@
 #include "chunk_blocks.h"
 #include "axis_map.h"
 #include "reduce/tuning.h"
-#include "reduce/block_emit.h"
 #include "reduce/growing_histogram.h"
 #include "reduce/pass.h"
 #include "reduce/plane_selection.h"
