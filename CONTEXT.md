@@ -182,3 +182,11 @@ may bring one of its own instead -- of nothing, for a scan that will not come ba
 as much as a walk will come back for, held only as long as the walk. A chunk is decoded whole, so
 a read that needs any of it keeps all of it.
 _Avoid_: tile cache, chunk cache policy, bypass
+
+**Provisional histogram**:
+What one task of a cube histogram's walk bins its pixels into, before anything is known of the
+range: fine, starting around the first pixel it sees and doubling to fit whatever arrives after.
+Each task keeps its own and none is ever merged with another. At the end -- or whenever a caller asks
+for a snapshot -- each is re-aggregated onto the caller's bins over the extremes, which are exact,
+and the counts are added. How fine it is, is what `provisional_bins` says.
+_Avoid_: partial, accumulator, tile histogram, intermediate histogram
