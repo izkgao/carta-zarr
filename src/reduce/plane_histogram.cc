@@ -96,11 +96,7 @@ Result<void> ComputeHistogram(const ReducibleImage& image, const HistogramReques
     }
     const auto& plan = planned.value();
 
-    // A whole plane, so the layer the emit budget is spent against -- which is the same layer
-    // progress is counted in -- is the plan's own.
-    const std::size_t bytes_per_channel = static_cast<std::size_t>(request.bins) * sizeof(std::uint64_t);
-    const BlockEmitter emitter(plan, plan.layer_chunks, bytes_per_channel, request.emit_every_channels,
-                               "The histogram was cancelled by its sink");
+    auto pass = PassOverPlane(source, plan, options, "The histogram was cancelled by its sink");
 
     // The caller's own sequence: divide in double, narrow the width, compare against the narrowed
     // bounds. Doing any one of those in the other type moves pixels across bin edges.
@@ -122,8 +118,8 @@ Result<void> ComputeHistogram(const ReducibleImage& image, const HistogramReques
     }
 
     // One read's worth of pixels binned into the block's counts. Named rather than written
-    // into the call below, because a visitor nested inside the walk inside the emitter is
-    // three lambdas deep before the first loop.
+    // into the call below, because it is the longest of the three lambdas the pass is handed
+    // and written in place it would bury the other two.
     const auto bin_slab = [&](const Slab& slab) {
         // Hoisted into locals so that the loops below are the same text they were when the
         // pass handed these over as eight separate arguments.
@@ -187,11 +183,9 @@ Result<void> ComputeHistogram(const ReducibleImage& image, const HistogramReques
         }
     };
 
-    return emitter.Over(
-        [&](std::uint64_t length) { counts.assign(static_cast<std::size_t>(length) * bins, 0); },
-        [&](EmitBlock& block, const auto& report) {
-            return RunPass(source, plan, options, block.begin, block.end, block.chunks_done, report, bin_slab);
-        },
+    return pass.InBlocks(
+        bins * sizeof(std::uint64_t), request.emit_every_channels,
+        [&](std::uint64_t length) { counts.assign(static_cast<std::size_t>(length) * bins, 0); }, bin_slab,
         [&](SelectionChannel first_channel, std::uint64_t length, bool complete, double completeness) {
             HistogramBlock block;
             // Out of the type and into the public block, which is the one place it happens.
