@@ -81,7 +81,8 @@ public:
         if (!checked) {
             return checked.error();
         }
-        return PlanPass(*_descriptor, *_geometry, *_flag_geometry, _map, checked.value(), sample, options);
+        return PlanPass(*_descriptor, *_geometry, *_flag_geometry, _map, checked.value(), sample, options,
+                        _workers->size());
     }
 
     // How a reduction whose tasks each hold an accumulator of `accumulator_bytes` divides a read

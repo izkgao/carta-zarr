@@ -78,25 +78,24 @@ private:
     friend struct internal::CachePoolAccess;
 };
 
-// Called as a read advances, with the number of destination elements that are final and the number
-// the request will produce in total. Returning false cancels the read, which then reports cancelled.
-//
-// Supplying one splits the read into chunk-aligned pieces along the slowest-varying selected axis,
-// so that there is somewhere to report from and somewhere to stop. The destination is dense in
-// logical order with axis 0 fastest, which is what makes the finished part a prefix rather than a
-// scatter -- a caller can render or forward it as it arrives.
-//
-// It is not the only thing that splits a read; ReadOptions::read_budget_bytes does too,
-// and a read with neither is issued in one piece.
-//
-// An argument of Image::Read rather than a field of ReadOptions, because it is the only operation
-// that has anywhere to report from in these terms -- a reduction reports through its sink, and a
-// cube histogram through a CubeHistogramProgressCallback of its own. As a field it would be one the
-// other entry points silently ignored; as an argument it is simply not part of what they take.
-//
-// A read that nothing interrupts is not made slower by supplying one: the pieces are sized to hold
-// enough chunks to decode in parallel, and at that size a split read measures the same as an
-// unsplit one.
+/// Called as a read advances, with the number of destination elements that are final and the number
+/// the request will produce in total. Returning false cancels the read, which then reports cancelled.
+///
+/// A watched read is cut into chunk-aligned pieces along the slowest-varying selected axis, as many as
+/// ReadOptions::read_budget_bytes needs, and this is called as each piece is finished. The
+/// destination is dense in logical order with axis 0 fastest, which is what makes the finished part
+/// a prefix rather than a scatter -- a caller can render or forward it as it arrives. A piece too
+/// large to read whole is read in parts and reported when all of them are in, so the prefix holds.
+///
+/// An argument of Image::Read rather than a field of ReadOptions, because it is the only operation
+/// that has anywhere to report from in these terms -- a reduction reports through its sink, and a
+/// cube histogram through a CubeHistogramProgressCallback of its own. As a field it would be one the
+/// other entry points silently ignored; as an argument it is simply not part of what they take.
+///
+/// Supplying one can cut a read that would otherwise be issued whole: a read nobody watches is not
+/// cut while the chunks decoded at once, no more than one a decode thread, fit its budget, and one that
+/// is watched is cut to the chunks the budget affords so that there is a piece to report. On large
+/// chunks the two are cut alike; on small ones the watched read is somewhat slower.
 using ProgressCallback = std::function<bool(std::size_t elements_written, std::size_t elements_total)>;
 
 // What a read is allowed to do while it runs, whatever it is reading for.
@@ -139,23 +138,26 @@ struct ReadOptions {
     // flag read. On by default: masking during the read costs one pass over data already in hand,
     // while a caller doing it afterwards pays for a second traversal.
     bool apply_pixel_mask = true;
-    // How much decoded chunk data one read of the pixels should hold at once, in bytes. Zero means
-    // the library's own budget, which it sizes from the image's chunks.
-    //
-    // Every operation that takes these options spends it the same way. Image::Read cuts its request
-    // into pieces of about this much; ReduceSpectral, ComputeHistogram and ComputeCubeHistogram size
-    // each read of their walk by it. Setting it splits a read whether or not anyone asked to watch,
-    // since it is a statement about memory rather than about wanting progress.
-    //
-    // It is a budget rather than a ceiling, because a chunk is the smallest thing that can be
-    // decoded: asking for part of one decodes all of it, and asking twice decodes it twice. So no
-    // read holds less than one chunk, and an image whose chunk is larger than this exceeds it by the
-    // ratio rather than refusing. ChunkGeometry::chunk_shape says in advance when that will happen.
-    //
-    // What it does bound outright is the one buffer the library allocates for a read's own sake.
-    // When Image::Read folds in the pixel mask it holds the flag for one piece, and a piece whose
-    // flag would exceed this -- because no axis selects more than one element, or a single chunk is
-    // still too large -- reports buffer_too_small rather than allocating past it.
+    /// How much memory one read may hold at once beyond the caller's own destination, in bytes. Zero
+    /// means the library's own budget: two chunks for every decode thread of the image's context,
+    /// between 256 MiB and 2 GiB.
+    ///
+    /// What a read holds is the chunks it is decoding -- each about three times what it decodes to,
+    /// for its compressed bytes and the codec's buffer beside the decoded copy -- and the buffers the
+    /// library allocates for them: the folded-in pixel mask, a byte an element, and the pixels
+    /// themselves wherever the library rather than the caller holds them. Every operation that takes
+    /// these options spends it the same way, and every one keeps to it whether or not anybody watches:
+    /// Image::Read and Image::Prefetch cut their request into pieces that fit, and ReduceSpectral,
+    /// ComputeHistogram and ComputeCubeHistogram size each read of their walk by it. A read holds no
+    /// more chunks than are decoded at once, at most one a decode thread, so one whose budget affords
+    /// that many is held to it without being cut; see ProgressCallback.
+    ///
+    /// A chunk is the smallest thing that can be decoded: asking for part of one decodes all of it.
+    /// So a read holds at least one chunk, and under a budget smaller than that it reads one chunk at
+    /// a time and holds what that chunk does rather than refusing. Image::DecodedChunkBytes says in
+    /// advance what a chunk decodes to.
+    ///
+    /// The budget is per read. Reads running at once each hold their own.
     std::size_t read_budget_bytes = 0;
 };
 

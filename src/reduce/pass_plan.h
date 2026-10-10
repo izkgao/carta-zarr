@@ -74,7 +74,8 @@ using BlockChannel = ChannelIndex<struct BlockChannelTag>;
 class PassPlan;
 
 PassPlan PlanPass(const ImageDescriptor& descriptor, const ChunkGeometry& geometry, const ChunkGeometry& flag_geometry,
-                  const AxisMap& map, const CheckedPlanes& planes, std::uint64_t sample, const ReadOptions& options);
+                  const AxisMap& map, const CheckedPlanes& planes, std::uint64_t sample, const ReadOptions& options,
+                  std::size_t decode_threads);
 
 class PassPlan {
 public:
@@ -87,11 +88,13 @@ public:
     std::uint64_t v_length = 0;
     std::uint64_t chunk_u = 1;
     std::uint64_t chunk_v = 1;
-    // What one chunk costs to decode, counting the flag chunks beside it when this read applies the
-    // mask -- in the flag's own chunks, see DecodedFlagBytes -- and how much of that a single read may
-    // hold. Both are answers rather than steps towards one:
-    // ADR 0005 turns on the first, and the second is the caller's own ceiling when it stated one.
+    // What one chunk decodes to, counting the flag chunks beside it when this read applies the mask
+    // -- in the flag's own chunks, see DecodedFlagBytes -- what it holds while it is read, slab and
+    // mask buffers included, and how much a single read may hold. All three are answers rather than
+    // steps towards one: ADR 0005 turns on the first, ADR 0021 on the second, and the third is the
+    // caller's own ceiling when it stated one.
     std::uint64_t chunk_bytes = 1;
+    std::uint64_t held_bytes = 1;
     std::size_t slab_budget_bytes = 0;
     std::uint64_t band_rows = 1;
     // The chunks of one spectral layer of the plane that the sample has a pixel in -- every chunk
@@ -143,7 +146,7 @@ public:
     // Public because it is the whole of the budget a reader of the occupancy needs, and handing that
     // over as one number rather than a PassPlan keeps the occupancy testable with nothing linked
     // behind it -- ADR 0006.
-    std::uint64_t ChunksPerRead() const noexcept { return slab_budget_bytes / std::max<std::uint64_t>(1, chunk_bytes); }
+    std::uint64_t ChunksPerRead() const noexcept { return slab_budget_bytes / std::max<std::uint64_t>(1, held_bytes); }
 
     // How many units of `chunks_per_unit` chunks one read's budget affords -- the rule in
     // chunk_blocks.h, asked with this plan's budget.
@@ -183,7 +186,7 @@ public:
 private:
     friend PassPlan PlanPass(const ImageDescriptor& descriptor, const ChunkGeometry& geometry,
                              const ChunkGeometry& flag_geometry, const AxisMap& map, const CheckedPlanes& planes,
-                             std::uint64_t sample, const ReadOptions& options);
+                             std::uint64_t sample, const ReadOptions& options, std::size_t decode_threads);
 
     // Steps towards the answers above rather than answers themselves, kept here so that no caller
     // divides them out for itself. Nothing asserts either directly -- what a test has to say about them it says through

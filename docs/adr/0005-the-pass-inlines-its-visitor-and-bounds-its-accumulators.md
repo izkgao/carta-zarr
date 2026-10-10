@@ -93,6 +93,10 @@ is all of it. A read of several pixel chunks sharing one flag chunk decodes that
 over-counts such a read -- deliberately: both walks count in pixel chunks, an over-count costs a read
 some parallelism, and an under-count spends memory the caller's budget said not to.
 
+What a chunk costs is what it holds while it is read, not only what it decodes to, and both walks
+keep to the budget whether or not anybody watches; `Image::Read` reads a piece too large at one
+chunk deep in segments. ADR 0021 records why.
+
 ## Consequences
 
 The pass cannot be given a non-template entry point for convenience, and a second overload taking a

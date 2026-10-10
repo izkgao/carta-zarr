@@ -28,6 +28,9 @@
 
 namespace {
 
+// What a context gives every read here to aim its default budget at.
+constexpr std::size_t kDecodeThreads = 4;
+
 using carta::zarr::AxisRole;
 using carta::zarr::ChunkGeometry;
 using carta::zarr::ImageDescriptor;
@@ -88,7 +91,7 @@ PassPlan Plan(const ImageDescriptor& descriptor, const ChunkGeometry& geometry, 
     Require(static_cast<bool>(map), "MapAxes failed on a well-formed image");
     const auto planes = CheckedPlanes::Of(descriptor, map.value(), {spectral, 0, 0});
     Require(static_cast<bool>(planes), "the spectral range does not fit this image");
-    return PlanPass(descriptor, geometry, flag_geometry, map.value(), planes.value(), sample, options);
+    return PlanPass(descriptor, geometry, flag_geometry, map.value(), planes.value(), sample, options, kDecodeThreads);
 }
 
 // A flag chunked as its pixels are, which is every image here but one.
@@ -105,6 +108,13 @@ carta::zarr::Result<void> WalkWhole(const SyntheticPixelSource& source, const Pa
                                     const ReadOptions& options, Visit&& visit) {
     auto pass = PassOverPlane(source, plan, options, kCancelled);
     return pass.Whole([](double) { return true; }, visit);
+}
+
+// A budget that affords `chunks` unmasked float32 chunks of `elements` each to a pass: each holds what
+// it decodes to kHeldBytesPerDecodedByte times over, and its share of the slab, four bytes an element.
+std::size_t BudgetOf(std::uint64_t chunks, std::uint64_t elements) {
+    return static_cast<std::size_t>(chunks * (carta::zarr::internal::kHeldBytesPerDecodedByte + 1) * elements *
+                                    sizeof(float));
 }
 
 // Which spatial axis the pass walks along is the store's decision, not the image's. Reading a plane
@@ -160,8 +170,13 @@ void TestAFlagIsCountedInItsOwnChunks() {
     const auto image = MakeImage(512, 520, 32, true);
     const auto geometry = MakeGeometry(256, 260, 2, AxisRole::spatial_y);
     const std::uint64_t pixel_bytes = 256ULL * 260ULL * 2ULL * 4ULL;
+    // Four chunks of a flag chunked alike, each holding its decoded pixels and flag three times over,
+    // the folded-in flag a byte an element and the slab four bytes an element.
+    const std::uint64_t elements = 256ULL * 260ULL * 2ULL;
+    const std::uint64_t held_alike = (carta::zarr::internal::kHeldBytesPerDecodedByte * (pixel_bytes + elements)) +
+                                     elements + (elements * sizeof(float));
     ReadOptions options;
-    options.read_budget_bytes = 4 * (pixel_bytes + (256ULL * 260ULL * 2ULL));
+    options.read_budget_bytes = 4 * held_alike;
 
     ChunkGeometry whole;
     whole.chunk_shape = {512, 520, 32, 1, 1};
@@ -190,9 +205,8 @@ void TestTheCallersCeilingWins() {
     Require(small.slab_budget_bytes == (1u << 20), "a stated limit is the budget");
 
     const auto def = Plan(image, geometry, spectral, ReadOptions{});
-    Require(def.slab_budget_bytes ==
-                carta::zarr::internal::DefaultReadBytes(carta::zarr::internal::DecodedChunkBytes(image, geometry)),
-            "without a limit the budget is the one chunk_blocks measured");
+    Require(def.slab_budget_bytes == carta::zarr::internal::DefaultReadBytes(def.held_bytes, kDecodeThreads),
+            "without a limit the budget is the one chunk_blocks measured, for what a chunk holds");
 }
 
 // How many selected channels one chunk of the spectral axis holds is what keeps a slab from ending
@@ -337,7 +351,7 @@ void TestEachChunkIsReadOnce() {
     const auto geometry = MakeGeometry(128, 130, 4, AxisRole::spatial_y);
     ReadOptions options;
     // Small enough that the pass has to split along the chunk rows and along the spectrum at once.
-    options.read_budget_bytes = 4 * 128 * 130 * 4 * 4;
+    options.read_budget_bytes = BudgetOf(4, 128 * 130 * 4);
     const auto plan = Plan(image, geometry, Range{0, 32, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
 
@@ -355,7 +369,7 @@ void TestThePassVisitsEveryPixelOnce() {
     const auto image = MakeImage(64, 40, 8);
     const auto geometry = MakeGeometry(16, 20, 2, AxisRole::spatial_y);
     ReadOptions options;
-    options.read_budget_bytes = 16 * 20 * 2 * 4;
+    options.read_budget_bytes = BudgetOf(1, 16 * 20 * 2);
     const auto plan = Plan(image, geometry, Range{0, 8, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
 
@@ -412,7 +426,7 @@ void TestCancellationStopsThePass() {
     const auto image = MakeImage(256, 260, 16);
     const auto geometry = MakeGeometry(64, 65, 2, AxisRole::spatial_y);
     ReadOptions options;
-    options.read_budget_bytes = 64 * 65 * 2 * 4;
+    options.read_budget_bytes = BudgetOf(1, 64 * 65 * 2);
     int reads = 0;
     options.control.cancellation_requested = [&]() { return reads >= 2; };
     const auto plan = Plan(image, geometry, Range{0, 16, 1}, options);
@@ -443,7 +457,7 @@ void TestAReadFailureStopsThePass() {
     const auto image = MakeImage(128, 130, 8);
     const auto geometry = MakeGeometry(32, 65, 2, AxisRole::spatial_y);
     ReadOptions options;
-    options.read_budget_bytes = 32 * 65 * 2 * 4;
+    options.read_budget_bytes = BudgetOf(1, 32 * 65 * 2);
     const auto plan = Plan(image, geometry, Range{0, 8, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
     source.fail_read(2, carta::zarr::ErrorCode::io_error);
@@ -462,7 +476,7 @@ void TestALargePlaneSplitsIntoBands() {
     const auto geometry = MakeGeometry(512, 512, 1, AxisRole::spatial_y);
     ReadOptions options;
     // Eight chunks to a read, which is the floor chunk_blocks measured.
-    options.read_budget_bytes = 8 * 512 * 512 * 4;
+    options.read_budget_bytes = BudgetOf(8, 512 * 512);
     const auto plan = Plan(image, geometry, Range{0, 4, 1}, options);
     SyntheticPixelSource source(image, geometry, Encoded);
     // This one is about the splitting, not the pixels, so it does not pay for them.
@@ -485,7 +499,7 @@ void TestAChunkRowWiderThanTheBudgetIsSplitAlongIt() {
     // m is fastest, so u runs along the 64 pixels: eight chunks to a row.
     const auto geometry = MakeGeometry(8, 8, 1, AxisRole::spatial_y);
     ReadOptions options;
-    options.read_budget_bytes = 2 * 8 * 8 * 4;
+    options.read_budget_bytes = BudgetOf(2, 8 * 8);
     const auto plan = Plan(image, geometry, Range{0, 2, 1}, options);
     Require(plan.u_length == 64, "this test needs u along the wide axis");
     SyntheticPixelSource source(image, geometry, Encoded);
@@ -505,7 +519,7 @@ void TestASampledRowSplitsAlongItToo() {
     const auto image = MakeImage(16, 64, 1);
     const auto geometry = MakeGeometry(8, 8, 1, AxisRole::spatial_y);
     ReadOptions options;
-    options.read_budget_bytes = 1 * 8 * 8 * 4;
+    options.read_budget_bytes = BudgetOf(1, 8 * 8);
     const auto plan = Plan(image, geometry, Range{0, 1, 1}, options, 16);
     SyntheticPixelSource source(image, geometry, Encoded);
 
@@ -610,7 +624,7 @@ void TestBlocksAreCutOnChunkBoundaries() {
 // A 64 x 64 plane of 16 x 16 chunks is a layer of sixteen, eight channels deep in one chunk, under a
 // budget of four chunks: one block, read as four bands of one chunk row each.
 PassPlan FourBandsOfOneBlock(const ImageDescriptor& image, const ChunkGeometry& geometry, ReadOptions& options) {
-    options.read_budget_bytes = 4 * 16 * 16 * 8 * sizeof(float);
+    options.read_budget_bytes = BudgetOf(4, 16 * 16 * 8);
     return Plan(image, geometry, Range{0, 8, 1}, options);
 }
 
@@ -800,7 +814,7 @@ void TestFootprintsOccupyingNothing() {
     ReadOptions options;
     // A budget of four chunks, so that a layer of one chunk is visibly cut and a layer of none is
     // visibly not.
-    options.read_budget_bytes = 4 * 64 * 64 * sizeof(float);
+    options.read_budget_bytes = BudgetOf(4, 64 * 64);
     const auto plan = Plan(image, geometry, Range{0, 64, 1}, options);
 
     const auto blocks = [&](const std::vector<Footprint>& footprints, std::uint64_t& reads) {

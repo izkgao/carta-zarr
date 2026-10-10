@@ -165,6 +165,9 @@ public:
           flag_geometry(std::move(flag_geometry)),
           source(*this->store, this->descriptor) {}
 
+    // How many threads decode this image's chunks, which every read's default budget aims at.
+    std::size_t DecodeThreads() const noexcept { return context->workers->size(); }
+
     std::shared_ptr<Context::Impl> context;
     std::string location;
     // The profile that described this image, rather than the name of one to look up again. It is a
@@ -205,19 +208,21 @@ Result<std::size_t> Image::Read(const ReadRequest& request, BufferView<float> de
                                 const ProgressCallback& progress) const {
     return Guarded(ErrorCode::io_error, _impl->descriptor.id, [&] {
         return internal::ReadInPieces(_impl->source, _impl->descriptor, _impl->geometry, _impl->flag_geometry, request,
-                                      destination, options, progress);
+                                      destination, options, _impl->DecodeThreads(), progress);
     });
 }
 
 std::uint64_t Image::DecodedChunkBytes(const ReadOptions& options) const {
     // What every read and reduction sizes itself against, so that a caller's cache agrees with them.
-    return internal::ReadCost::Of(_impl->descriptor, _impl->geometry, _impl->flag_geometry, options).chunk_bytes;
+    return internal::ReadCost::Of(_impl->descriptor, _impl->geometry, _impl->flag_geometry, options,
+                                  internal::PixelsHeld::by_caller, _impl->DecodeThreads())
+        .chunk_bytes;
 }
 
 Result<std::uint64_t> Image::Prefetch(const ReadRequest& request, const ReadOptions& options) const {
     return Guarded(ErrorCode::io_error, _impl->descriptor.id, [&] {
         return internal::PrefetchChunks(_impl->source, _impl->descriptor, _impl->geometry, _impl->flag_geometry,
-                                        request, options);
+                                        request, options, _impl->DecodeThreads());
     });
 }
 
@@ -356,6 +361,9 @@ public:
           descriptor(std::move(descriptor)),
           profile(profile),
           store(std::make_shared<internal::Store>(std::move(store))) {}
+
+    // How many threads decode this image's chunks, which every read's default budget aims at.
+    std::size_t DecodeThreads() const noexcept { return context->workers->size(); }
 
     std::shared_ptr<Context::Impl> context;
     std::string location;

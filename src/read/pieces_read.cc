@@ -48,12 +48,49 @@ Result<zarr::PixelSelection> CheckRead(const ImageDescriptor& descriptor, const 
     return selection;
 }
 
+// Puts a segment, gathered densely in logical order in `from`, where it belongs in its piece's run of
+// the destination, which is dense in the piece's own logical order. Axis 0 is the fastest in both, so
+// the segment arrives a run of its axis-0 count at a time.
+void Place(const ReadRequest& piece, const ReadRequest& segment, const float* from, float* piece_destination) {
+    const std::size_t rank = piece.axes.size();
+    std::vector<std::uint64_t> stride(rank, 1);
+    std::uint64_t offset = 0;
+    for (std::size_t axis = 0; axis < rank; ++axis) {
+        if (axis > 0) {
+            stride[axis] = stride[axis - 1] * piece.axes[axis - 1].count;
+        }
+        const auto& whole = piece.axes[axis];
+        offset += ((segment.axes[axis].start - whole.start) / std::max<std::uint64_t>(1, whole.stride)) * stride[axis];
+    }
+    const std::uint64_t run = segment.axes[0].count;
+    std::vector<std::uint64_t> at(rank, 0);
+    while (true) {
+        std::uint64_t into = offset;
+        for (std::size_t axis = 1; axis < rank; ++axis) {
+            into += at[axis] * stride[axis];
+        }
+        std::copy_n(from, run, piece_destination + into);
+        from += run;
+        // The next run, the faster axes first.
+        std::size_t axis = 1;
+        for (; axis < rank; ++axis) {
+            if (++at[axis] < segment.axes[axis].count) {
+                break;
+            }
+            at[axis] = 0;
+        }
+        if (axis == rank) {
+            return;
+        }
+    }
+}
+
 }  // namespace
 
 Result<std::size_t> ReadInPieces(const PixelSource& source, const ImageDescriptor& descriptor,
                                  const ChunkGeometry& geometry, const ChunkGeometry& flag_geometry,
                                  const ReadRequest& request, BufferView<float> destination, const ReadOptions& options,
-                                 const ProgressCallback& progress) {
+                                 std::size_t decode_threads, const ProgressCallback& progress) {
     const auto checked = CheckRead(descriptor, request, destination.size, options.control);
     if (!checked) {
         return checked.error();
@@ -63,45 +100,65 @@ Result<std::size_t> ReadInPieces(const PixelSource& source, const ImageDescripto
     const auto elements = checked.value().elements();
 
     const bool apply_mask = AppliesPixelMask(options, descriptor);
-    const auto pieces = PlanPieces(descriptor, geometry, flag_geometry, request, options, static_cast<bool>(progress));
+    const auto pieces =
+        PlanPieces(descriptor, geometry, flag_geometry, request, options, decode_threads, static_cast<bool>(progress));
 
     std::vector<std::uint8_t> mask;
-    for (const auto& piece : pieces) {
-        auto piece_selection = zarr::BuildSelection(descriptor, piece.request, zarr::DestinationOrder::logical);
-        if (!piece_selection) {
-            return piece_selection.error();
+    std::vector<float> gathered;
+    // Reads `part` into `into`: its flag first, so that a flag that cannot be read leaves `into` as it
+    // was, then its pixels, then the one folded into the other.
+    const auto read_part = [&](const ReadRequest& part, BufferView<float> into) -> Result<std::size_t> {
+        auto selection = zarr::BuildSelection(descriptor, part, zarr::DestinationOrder::logical);
+        if (!selection) {
+            return selection.error();
         }
-        const auto piece_elements = static_cast<std::size_t>(piece_selection.value().elements());
+        const auto part_elements = static_cast<std::size_t>(selection.value().elements());
+        if (apply_mask) {
+            mask.assign(part_elements, 0);
+            // TensorStore still owns the pixel operation's in-flight completion before it returns, so
+            // the destination remains valid for the next read.
+            if (auto mask_read = source.ReadMask(selection.value(), {mask.data(), mask.size()}, options.control);
+                !mask_read) {
+                return mask_read.error();
+            }
+        }
+        if (auto read = source.ReadPixels(selection.value(), into, options.control); !read) {
+            return read.error();
+        }
+        if (apply_mask) {
+            ApplyPixelMask(into.data, mask.data(), part_elements);
+        }
+        return part_elements;
+    };
+
+    for (const auto& piece : pieces) {
         // The rest of the caller's buffer from where this piece lands, not the piece's own size: the
         // seam holds the one to the other, and handing it the piece's size would have it compare the
         // piece with itself. first_element is short of the whole read's count, which CheckRead held
         // to the buffer, so this never runs backwards.
         const BufferView<float> piece_destination{destination.data + piece.first_element,
                                                   destination.size - static_cast<std::size_t>(piece.first_element)};
-
-        if (apply_mask) {
-            // The budget bounds the flag a piece holds, and a read that is not split is one piece,
-            // so a request that cannot be cut any further still has to say so rather than allocate.
-            if (options.read_budget_bytes != 0 && piece_elements > options.read_budget_bytes) {
-                return Error{ErrorCode::buffer_too_small, "Pixel mask temporary buffer exceeds the read budget",
-                             descriptor.id};
+        std::size_t piece_elements = 0;
+        if (piece.segments.empty()) {
+            auto read = read_part(piece.request, piece_destination);
+            if (!read) {
+                return read.error();
             }
-            mask.assign(piece_elements, 0);
-            // The mask is read first so that an unavailable or cancelled mask cannot leave this
-            // piece of the destination updated. TensorStore still owns the pixel operation's
-            // in-flight completion before it returns, so the destination remains valid for the next
-            // read.
-            auto mask_read = source.ReadMask(piece_selection.value(), {mask.data(), mask.size()}, options.control);
-            if (!mask_read) {
-                return mask_read.error();
+            piece_elements = read.value();
+        } else {
+            for (const auto& segment : piece.segments) {
+                std::uint64_t segment_elements = 1;
+                for (const auto& range : segment.axes) {
+                    segment_elements *= range.count;
+                }
+                gathered.resize(static_cast<std::size_t>(segment_elements));
+                auto read = read_part(segment, {gathered.data(), gathered.size()});
+                if (!read) {
+                    return read.error();
+                }
+                Place(piece.request, segment, gathered.data(), piece_destination.data);
+                piece_elements += read.value();
             }
-        }
-        auto read = source.ReadPixels(piece_selection.value(), piece_destination, options.control);
-        if (!read) {
-            return read.error();
-        }
-        if (apply_mask) {
-            ApplyPixelMask(piece_destination.data, mask.data(), piece_elements);
         }
 
         const auto finished = static_cast<std::size_t>(piece.first_element + piece_elements);
@@ -190,7 +247,8 @@ Result<void> ForEachPiece(const ReadRequest& request, std::uint64_t most, Read&&
 
 Result<std::uint64_t> PrefetchChunks(const PixelSource& source, const ImageDescriptor& descriptor,
                                      const ChunkGeometry& geometry, const ChunkGeometry& flag_geometry,
-                                     const ReadRequest& request, const ReadOptions& options) {
+                                     const ReadRequest& request, const ReadOptions& options,
+                                     std::size_t decode_threads) {
     // Checked as the request the caller made, so that a mistake in it is reported in its own terms
     // rather than in those of the sample made from it.
     if (auto checked = zarr::BuildSelection(descriptor, request, zarr::DestinationOrder::logical); !checked) {
@@ -212,7 +270,7 @@ Result<std::uint64_t> PrefetchChunks(const PixelSource& source, const ImageDescr
     std::vector<float> discarded(static_cast<std::size_t>(std::min(chunks, SampleElements(options, sizeof(float)))));
     auto read = ForEachPiece(sample, discarded.size(), [&](const ReadRequest& piece) -> Result<void> {
         auto piece_read = ReadInPieces(source, descriptor, geometry, flag_geometry, piece,
-                                       {discarded.data(), discarded.size()}, pixels_only, {});
+                                       {discarded.data(), discarded.size()}, pixels_only, decode_threads, {});
         if (!piece_read) {
             return piece_read.error();
         }
@@ -231,15 +289,16 @@ Result<std::uint64_t> PrefetchChunks(const PixelSource& source, const ImageDescr
         static_cast<std::size_t>(std::min(flag_chunks, SampleElements(options, sizeof(std::uint8_t)))));
     // Each element of the sample decodes a whole flag chunk, so a piece is held to the chunks the
     // budget affords too, and not only to its buffer: a byte an element bounded the buffer and let one
-    // read of 1024 x 1024 flags chunked 32 x 32 decode a MiB against a budget of 8 KiB. One chunk at
-    // the least, as a read holds one however small the budget. The pixels' pieces go through
-    // ReadInPieces, which cuts them by what their chunks decode to as it cuts any read -- down to a row
-    // of chunks along the axis it splits, which is as far as Image::Read goes either.
-    const std::uint64_t flag_chunk_bytes = ChunkElements(flag_geometry.chunk_shape.empty() ? geometry : flag_geometry);
+    // read of 1024 x 1024 flags chunked 32 x 32 decode a MiB against a budget of 8 KiB. A flag chunk
+    // holds what any chunk does for the bytes it decodes to, a byte an element. One chunk at the
+    // least, as a read holds one however small the budget. The pixels' pieces go through ReadInPieces,
+    // which cuts them by what their chunks hold as it cuts any read.
+    const std::uint64_t flag_chunk_held =
+        kHeldBytesPerDecodedByte * ChunkElements(flag_geometry.chunk_shape.empty() ? geometry : flag_geometry);
     const std::uint64_t flag_budget =
-        options.read_budget_bytes != 0 ? options.read_budget_bytes : DefaultReadBytes(flag_chunk_bytes);
+        options.read_budget_bytes != 0 ? options.read_budget_bytes : DefaultReadBytes(flag_chunk_held, decode_threads);
     const std::uint64_t flag_piece =
-        std::min<std::uint64_t>(discarded_flags.size(), std::max<std::uint64_t>(1, flag_budget / flag_chunk_bytes));
+        std::min<std::uint64_t>(discarded_flags.size(), std::max<std::uint64_t>(1, flag_budget / flag_chunk_held));
     auto flags = ForEachPiece(flag_sample, flag_piece, [&](const ReadRequest& piece) -> Result<void> {
         auto selection = zarr::BuildSelection(descriptor, piece, zarr::DestinationOrder::logical);
         if (!selection) {

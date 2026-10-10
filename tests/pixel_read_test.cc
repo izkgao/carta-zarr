@@ -301,16 +301,20 @@ void TestReadControls(const carta::zarr::Image& sky) {
                 "splitting to fit a memory ceiling changed the pixel at offset " + std::to_string(i));
     }
 
-    // A ceiling no amount of splitting gets under is still refused rather than allocated past. The
-    // pieces bottom out at one chunk, because asking for less than a chunk decodes the whole chunk
-    // anyway, so below that there is nothing left to give.
+    // A ceiling no amount of splitting gets under is read a chunk at a time rather than refused:
+    // asking for less than a chunk decodes the whole chunk anyway, so one chunk is what a read holds
+    // however small its budget, and a caller whose data is chunked that way still gets its pixels.
     carta::zarr::ReadOptions unreachable;
     unreachable.read_budget_bytes = 1;
-    const auto refused = sky.Read(request, {pixels.data(), pixels.size()}, unreachable);
-    Require(!refused && refused.error().code == carta::zarr::ErrorCode::buffer_too_small,
-            "a masked read that cannot be split under its ceiling was not rejected");
-    Require(std::all_of(pixels.begin(), pixels.end(), [](float value) { return value == 123.0F; }),
-            "a read rejected for memory budget modified its destination");
+    std::vector<float> chunk_at_a_time(elements, 0.0F);
+    const auto one_chunk = sky.Read(request, {chunk_at_a_time.data(), chunk_at_a_time.size()}, unreachable);
+    Require(static_cast<bool>(one_chunk), "a read under a ceiling smaller than one chunk was refused" +
+                                              (one_chunk ? std::string{} : ": " + one_chunk.error().message));
+    for (std::size_t i = 0; i < elements; ++i) {
+        const bool both_nan = std::isnan(chunk_at_a_time.at(i)) && std::isnan(reference.at(i));
+        Require(both_nan || chunk_at_a_time.at(i) == reference.at(i),
+                "reading a chunk at a time changed the pixel at offset " + std::to_string(i));
+    }
 }
 
 // A read through a pool of its own returns what a read through the session's does: the pool decides

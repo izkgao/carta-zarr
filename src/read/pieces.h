@@ -26,10 +26,17 @@ namespace carta::zarr::internal {
  * destination it lands. A piece fills the destination from `first_element` for as many elements as
  * its request selects, and the pieces of a read fill it end to end, so the finished part is always a
  * prefix.
+ *
+ * A piece is read straight into the destination unless even the least of them -- one chunk along the
+ * cut, and the whole of every other axis -- holds more than a read affords. Then `segments` are the
+ * parts it is read in, cut along the other axes, each gathered in a buffer of the library's and put in
+ * place. A segment is not a run of the destination, which is why it is not a piece: progress is
+ * reported when the whole piece is in, and the prefix holds.
  */
 struct Piece {
     ReadRequest request;
     std::uint64_t first_element = 0;
+    std::vector<ReadRequest> segments;
 };
 
 /**
@@ -38,25 +45,24 @@ struct Piece {
  * Pure: it reaches no further than the descriptor, the geometry and what the caller asked for, so
  * the strategy is checkable without a store, a transport or a directory tree.
  *
- * A read is cut when there is a reason to cut it, and either reason is enough on its own. Somebody
- * to report progress to is one -- `watching` says whether there is, which is the whole of what this
- * ever asked about the callback. A stated read budget is the other: it says how much the read may
- * hold at once, and splitting to fit is a better answer than refusing to read at all. A read with
- * neither reason, or with no axis selecting more than one element, is one piece covering everything,
- * so that the loop reading it is the same loop either way.
+ * Every read is cut to fit its budget -- the caller's, or the library's own when it states none -- so
+ * that what a read holds is bounded whether or not anybody watches it. What it holds is the chunks
+ * TensorStore decodes at once, which is no more than `decode_threads` of them: a read nobody watches
+ * (`reports_progress` false) whose budget affords that many is not cut at all, while one that is
+ * watched is cut to the chunks the budget affords, so that it has pieces to report. A read that fits,
+ * or that has no axis selecting more than one element, is one piece covering everything, so that the
+ * loop reading it is the same loop either way.
  *
- * Where to cut, how much one piece may cover, and where its end is rounded out to a chunk boundary
- * all happen here. They used to be handed to the one caller as a plan to carry out -- the cut axis,
- * the unit count, the elements per unit, the chunk extent -- and the caller did the arithmetic,
- * rewrote each piece's range and worked out where it landed. Whether the flag is decoded beside the
- * pixels, which the sizing counts, is asked of AppliesPixelMask rather than of the caller; what it
+ * Where to cut, how much one piece may cover, where its end is rounded out to a chunk boundary, and
+ * the segments of a piece too large to read whole all happen here. Whether the flag is decoded beside
+ * the pixels, which the sizing counts, is asked of AppliesPixelMask rather than of the caller; what it
  * costs is asked of the flag's own layout, `flag_geometry`, which need not be the pixels'.
  *
  * The request has been checked against the descriptor already: it is a selection of this image.
  */
 std::vector<Piece> PlanPieces(const ImageDescriptor& descriptor, const ChunkGeometry& geometry,
                               const ChunkGeometry& flag_geometry, const ReadRequest& request,
-                              const ReadOptions& options, bool watching);
+                              const ReadOptions& options, std::size_t decode_threads, bool reports_progress);
 
 /**
  * Read a densely packed float32 result, one piece at a time.
@@ -72,15 +78,15 @@ std::vector<Piece> PlanPieces(const ImageDescriptor& descriptor, const ChunkGeom
  *
  * The flag is read before the pixels, which is the opposite of what a pass does and is the reason
  * ADR 0005 gives for this staying outside one: the destination is the caller's, so a mask that
- * cannot be read must not leave a piece of it updated.
+ * cannot be read must not leave a piece of it updated. A piece read in segments keeps that for each
+ * segment; the segments of it already put in place stay there, past the finished prefix.
  *
- * Reports buffer_too_small when the destination cannot hold the selection, or when a piece's flag
- * buffer exceeds a ceiling that no further splitting gets under.
+ * Reports invalid_argument when the destination cannot hold the selection.
  */
 Result<std::size_t> ReadInPieces(const PixelSource& source, const ImageDescriptor& descriptor,
                                  const ChunkGeometry& geometry, const ChunkGeometry& flag_geometry,
                                  const ReadRequest& request, BufferView<float> destination, const ReadOptions& options,
-                                 const ProgressCallback& progress);
+                                 std::size_t decode_threads, const ProgressCallback& progress);
 
 /**
  * One selected element in every chunk that `request` touches, and no more.
@@ -112,7 +118,8 @@ ReadRequest OneElementPerChunk(const ChunkGeometry& geometry, const ReadRequest&
  */
 Result<std::uint64_t> PrefetchChunks(const PixelSource& source, const ImageDescriptor& descriptor,
                                      const ChunkGeometry& geometry, const ChunkGeometry& flag_geometry,
-                                     const ReadRequest& request, const ReadOptions& options);
+                                     const ReadRequest& request, const ReadOptions& options,
+                                     std::size_t decode_threads);
 
 }  // namespace carta::zarr::internal
 

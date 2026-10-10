@@ -18,45 +18,48 @@
 
 namespace carta::zarr::internal {
 
-// How much decompressed chunk data one storage request should pull through.
+// What a chunk in flight holds, for every byte it decodes to.
 //
-// Two things set this, and they pull in opposite directions. A request that is too small stops
-// holding enough chunks to decode in parallel -- see kMinChunksPerRead below, which is that floor
-// in the unit it is really in. Above about 100 MiB a piece takes longer than the interval a caller
-// wants to report progress on, which is the reason for splitting at all.
+// A read budget bounds memory, and decoded bytes are not all of what a read holds: while a chunk is
+// decoded, its compressed bytes and the codec's own buffer are resident beside the decoded copy.
+// Measured peak resident memory, over a 7763 x 4742 x 128 cube in 512 x 512 x 64 chunks of blosc
+// zstd, is `base + destination + chunks x (2 x decoded + compressed)` at one, two and four chunks a
+// read, and four decode threads or twenty-eight made no difference to it -- so what a read holds
+// is decided by how many chunks it decodes, not by the machine. Compressed bytes are at most about
+// the decoded ones, so three is the worst a chunk holds.
 //
-// 64 MiB sits between them for the images these were measured on: sixteen chunks of a 4 MiB one,
-// and about a third of a second of decoding at the rates they decompress at. DefaultReadBytes
-// raises it when a chunk is large enough that this many bytes would not buy enough chunks.
-//
-// This is a byte budget rather than a chunk count because chunk sizes are not comparable across
-// real images -- the cubes measured here span 0.12 MiB to 480 MiB per decoded chunk, a factor of
-// nearly four thousand. A fixed count of 64 would mean 8 MiB pieces on one of them and 30 GiB
-// pieces on another, and the one with the largest chunks would end up never splitting at all.
-inline constexpr std::size_t kDecodedBytesPerRead = 64u << 20;
+// Three on every image, rather than a figure per codec: a cheaper codec is held under the budget it
+// was given, while a figure worked out from TensorStore's codecs would go quietly wrong when they
+// change. It is a statement of what the budget means, not a tuning, so nothing overrides it.
+inline constexpr std::uint64_t kHeldBytesPerDecodedByte = 3;
 
-// The chunks one request should cover, below which the decode pool runs short of work.
+// The chunks one read should decode at once for each thread decoding them, below which the decode
+// pool runs short of work.
 //
-// This is the same floor the budget above describes, stated in the unit it is actually in. On a
-// 1 MiB chunk image a whole-plane profile took 98 ms at 64 chunks per request and 462 ms at one,
-// which is what it took with the pool limited to one thread: a request holding one chunk has
-// nothing to spread over the pool.
-//
-// So a budget in bytes alone is not enough: 64 MiB is sixteen chunks of a 4 MiB image and four of a
-// 16 MiB one, and XRADIO writes both -- 512x512x4 is 4 MiB with one polarization and 16 MiB with
-// four of them in the chunk. Eight is where the curve is within a quarter of flat on a five-core
-// machine. A machine with more decode threads wants more, so this is a floor, not a target.
-inline constexpr std::uint64_t kMinChunksPerRead = 8;
+// On a 1 MiB chunk image a whole-plane profile took 98 ms at 64 chunks per request and 462 ms at
+// one, which is what it took with the pool limited to one thread: a request holding one chunk has
+// nothing to spread over the pool. A count fixed for every machine does not hold: eight a read was
+// within a quarter of flat on a five-core machine, and on twenty-eight threads it left most of them
+// idle and plane reads of 64 MiB chunks ran 2.4 times slower. Two a thread keeps every thread one
+// chunk ahead of the one it is decoding.
+inline constexpr std::uint64_t kChunksPerDecodeThread = 2;
 
-// The ceiling on raising the budget to reach that floor. An image whose chunk is already a large
-// fraction of what a request should hold cannot be given eight of them, and past this both reasons
-// for splitting at all -- bounded memory, and a piece short enough to report on -- are lost anyway.
-inline constexpr std::size_t kMaxDecodedBytesPerRead = 256u << 20;
+// The least a read holds by default, whatever its chunks and threads. On small chunks this, not the
+// thread count, sets the read: 256 MiB is sixty-four 1 MiB chunks, which keeps every decode thread
+// busy and a piece short enough to report progress on.
+inline constexpr std::uint64_t kLeastBytesPerRead = 256u << 20;
 
-// What one request may decode when the caller has not said otherwise.
-inline std::uint64_t DefaultReadBytes(std::uint64_t chunk_bytes) {
-    const std::uint64_t wanted = std::max<std::uint64_t>(1, chunk_bytes) * kMinChunksPerRead;
-    return std::min<std::uint64_t>(kMaxDecodedBytesPerRead, std::max<std::uint64_t>(kDecodedBytesPerRead, wanted));
+// The most a read holds by default. Two chunks a thread of 64 MiB ones would hold over 10 GiB on
+// twenty-eight threads; this keeps them to ten. What a deployment short of memory wants instead it
+// sets as ReadOptions::read_budget_bytes.
+inline constexpr std::uint64_t kMostBytesPerRead = 2u << 30;
+
+// What one read may hold when the caller has not said otherwise, given what one chunk of it holds
+// and how many threads decode its chunks. No thread count is taken as one.
+inline std::uint64_t DefaultReadBytes(std::uint64_t held_per_chunk, std::size_t decode_threads) {
+    const std::uint64_t wanted = std::max<std::uint64_t>(1, held_per_chunk) * kChunksPerDecodeThread *
+                                 std::max<std::uint64_t>(1, decode_threads);
+    return std::min<std::uint64_t>(kMostBytesPerRead, std::max<std::uint64_t>(kLeastBytesPerRead, wanted));
 }
 
 // How many units of `chunks_per_unit` chunks a read that may decode `chunks_per_read` chunks affords.
@@ -142,32 +145,56 @@ inline std::uint64_t DecodedFlagBytes(const ImageDescriptor& descriptor, const C
     return bytes;
 }
 
-// What one read of this image costs, and how much of that it may spend at once: the three answers
-// every walk starts from, whether it is Image::Read cutting pieces or a reduction planning a pass.
+// Who holds the pixels a read produces: the caller, whose destination they go straight into and which
+// no budget can shrink, or the library, in a buffer of its own that the budget pays for.
+enum class PixelsHeld { by_caller, by_library };
+
+// What one read of this image holds, and how much it may hold at once: the answers every walk starts
+// from, whether it is Image::Read cutting pieces or a reduction planning a pass. A read and a
+// reduction that sized themselves against different costs would split the same image differently for
+// no reason either could give, so both ask this.
 //
-// They were written out twice, word for word -- whether the flag is folded in, what a chunk
-// decodes to counting it, and the caller's budget or the library's own -- and the two copies have
-// to agree, because a read and a reduction that sized themselves against different costs would
-// split the same image differently for no reason either could give. The flag's own layout is part
-// of the second, so both are handed it: sized against the pixels' layout alone, each took the flag to
-// be chunked as its pixels were, which reading ahead already knew it need not be.
-//
-// A chunk here is a pixel chunk, and what it costs counts the flag it brings; see DecodedFlagBytes.
+// A chunk here is a pixel chunk. What it decodes to counts the flag it brings, in the flag's own
+// chunks (see DecodedFlagBytes); what it holds is that, kHeldBytesPerDecodedByte over, plus the
+// buffers the library allocates for its share of the read -- the folded-in flag a byte an element,
+// and the pixels when the library rather than the caller holds them. The default budget aims at
+// `decode_threads`, the threads of the context the read goes through.
 struct ReadCost {
     bool apply_mask = false;
     std::uint64_t chunk_bytes = 1;
+    std::uint64_t held_bytes = 1;
     std::size_t budget_bytes = 0;
 
     static ReadCost Of(const ImageDescriptor& descriptor, const ChunkGeometry& geometry,
-                       const ChunkGeometry& flag_geometry, const ReadOptions& options) {
+                       const ChunkGeometry& flag_geometry, const ReadOptions& options, PixelsHeld pixels,
+                       std::size_t decode_threads) {
         ReadCost cost;
         cost.apply_mask = AppliesPixelMask(options, descriptor);
         cost.chunk_bytes = DecodedChunkBytes(descriptor, geometry) +
                            (cost.apply_mask ? DecodedFlagBytes(descriptor, geometry, flag_geometry) : 0);
-        cost.budget_bytes =
-            options.read_budget_bytes != 0 ? options.read_budget_bytes : DefaultReadBytes(cost.chunk_bytes);
+        cost._chunk_elements = ChunkElements(geometry);
+        cost.held_bytes = cost.Held(pixels);
+        cost.budget_bytes = options.read_budget_bytes != 0 ? options.read_budget_bytes
+                                                           : DefaultReadBytes(cost.held_bytes, decode_threads);
         return cost;
     }
+
+    // What one chunk holds when `pixels` holds what it produces, against the same budget. A read whose
+    // pixels go to its caller still holds some itself when it has to gather them first.
+    std::uint64_t Held(PixelsHeld pixels) const {
+        return (kHeldBytesPerDecodedByte * chunk_bytes) + (apply_mask ? _chunk_elements : 0) +
+               (pixels == PixelsHeld::by_library ? _chunk_elements * sizeof(float) : 0);
+    }
+
+    // How many chunks the budget affords when `pixels` holds what they produce. Zero when it affords
+    // less than one, which every caller floors at one through UnitsAffordable: a chunk is the least
+    // that can be decoded.
+    std::uint64_t ChunksPerRead(PixelsHeld pixels) const {
+        return budget_bytes / std::max<std::uint64_t>(1, Held(pixels));
+    }
+
+private:
+    std::uint64_t _chunk_elements = 1;
 };
 
 // The end of a block of selected indices that begins at `begin` and would like to be `desired`

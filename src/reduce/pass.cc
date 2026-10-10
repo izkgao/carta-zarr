@@ -10,7 +10,8 @@
 namespace carta::zarr::internal {
 
 PassPlan PlanPass(const ImageDescriptor& descriptor, const ChunkGeometry& geometry, const ChunkGeometry& flag_geometry,
-                  const AxisMap& map, const CheckedPlanes& planes, std::uint64_t sample, const ReadOptions& options) {
+                  const AxisMap& map, const CheckedPlanes& planes, std::uint64_t sample, const ReadOptions& options,
+                  std::size_t decode_threads) {
     const Range spectral = planes.spectral();
     PassPlan plan;
     plan.descriptor = &descriptor;
@@ -25,9 +26,11 @@ PassPlan PlanPass(const ImageDescriptor& descriptor, const ChunkGeometry& geomet
     plan.chunk_u = std::max<std::uint64_t>(1, geometry.chunk_shape.at(plan.axis_u));
     plan.chunk_v = std::max<std::uint64_t>(1, geometry.chunk_shape.at(plan.axis_v));
     plan._chunk_depth = std::max<std::uint64_t>(1, geometry.chunk_shape.at(map.spectral));
-    const auto cost = ReadCost::Of(descriptor, geometry, flag_geometry, options);
+    const auto cost =
+        ReadCost::Of(descriptor, geometry, flag_geometry, options, PixelsHeld::by_library, decode_threads);
     plan.apply_mask = cost.apply_mask;
     plan.chunk_bytes = cost.chunk_bytes;
+    plan.held_bytes = cost.held_bytes;
     plan.slab_budget_bytes = cost.budget_bytes;
     // Rounded up without adding stride - 1, which wraps for a stride near the top of the range.
     plan._least_channels =

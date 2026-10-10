@@ -82,8 +82,8 @@ public:
     // than asked for in the request, because a request that could name a type the buffer was not
     // shaped for is a mistake worth making unspellable.
     //
-    // A progress callback watches it as it advances, which also splits it into pieces. See
-    // ProgressCallback.
+    /// It is read in pieces that keep to ReadOptions::read_budget_bytes, and a progress callback
+    /// watches them as they finish. See ProgressCallback.
     Result<std::size_t> Read(const ReadRequest& request, BufferView<float> destination, const ReadOptions& options = {},
                              const ProgressCallback& progress = {}) const;
 
